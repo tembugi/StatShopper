@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- chat lines use this, which /reload picks up.
-local VERSION = "0.1.2"
+local VERSION = "0.1.3"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
@@ -107,7 +107,7 @@ local stopped -- true after an error: the filters stay off until /reload
 local Guarded -- runs addon code inside Blizzard's without breaking it (defined below)
 
 --------------------------------------------------------------------------------
--- Test build only (0.1.2): measures where a filtered search's time goes and says it in chat
+-- Test build only (0.1.2, 0.1.3): measures where a filtered search's time goes and says it in chat
 -- when the search is done. The first search after a client restart stalled the game in 0.1.0
 -- and 0.1.1. Remove this section and the Measured/Count calls once the cause is known.
 --------------------------------------------------------------------------------
@@ -115,12 +115,13 @@ local Guarded -- runs addon code inside Blizzard's without breaking it (defined 
 local CALL_NAMES = {
 	instant = "item class",
 	cached = "cache check",
+	itemStats = "item stats",
 	tooltip = "tooltip",
 	name = "name",
 	ask = "item ask",
 	refresh = "list refresh",
 }
-local CALL_ORDER = { "tooltip", "name", "cached", "instant", "ask", "refresh" }
+local CALL_ORDER = { "tooltip", "itemStats", "name", "cached", "instant", "ask", "refresh" }
 local COUNT_NAMES = { "pages", "results", "reads", "asks", "arrived", "names", "redraws" }
 
 local measure -- nil, or the search being measured
@@ -159,8 +160,92 @@ end
 
 local function StartMeasuring()
 	local now = GetTimePreciseSec()
-	measure = { start = now, lastFrame = now, total = NewCounts(), frame = NewCounts(), slowest = {}, worstGap = 0 }
+	measure = {
+		start = now, lastFrame = now, total = NewCounts(), frame = NewCounts(), slowest = {}, worstGap = 0,
+		-- Test build 0.1.3: C_Item.GetItemStats against the tooltip, for every item read.
+		checked = 0, agree = 0, differ = 0, suffixItems = 0, suffixChanged = 0,
+	}
 	monitor:Show()
+end
+
+-- An item link built from an item key: the random suffix in the link's seventh field. Whether
+-- the auction house's itemSuffix is that field's ID is what the test checks.
+local function KeyLink(itemKey, suffix)
+	return "item:" .. itemKey.itemID .. "::::::" .. suffix
+end
+
+-- The attributes C_Item.GetItemStats reports for a link, by stat key, as a set.
+local function RaisedByItemStats(link)
+	local stats = Measured("itemStats", C_Item.GetItemStats, link)
+	local raised = {}
+	if type(stats) == "table" then
+		for _, group in ipairs(ns.STAT_GROUPS) do
+			for _, stat in ipairs(group.stats) do
+				local amount = stats[stat.label]
+				if type(amount) == "number" and amount > 0 then
+					raised[stat.key] = true
+				end
+			end
+		end
+	end
+	return raised
+end
+
+local function SameSet(a, b)
+	for key in pairs(a) do
+		if not b[key] then
+			return false
+		end
+	end
+	for key in pairs(b) do
+		if not a[key] then
+			return false
+		end
+	end
+	return true
+end
+
+local function SetText(set)
+	local keys = {}
+	for key in pairs(set) do
+		keys[#keys + 1] = key:sub(1, 3):lower()
+	end
+	table.sort(keys)
+	return #keys > 0 and table.concat(keys, "+") or "none"
+end
+
+-- Before the tooltip is read: what GetItemStats says, with the suffix and, for a suffixed item,
+-- without it.
+local function CheckItemStatsBefore(itemKey)
+	if not measure then
+		return
+	end
+	local check = { withSuffix = RaisedByItemStats(KeyLink(itemKey, itemKey.itemSuffix)) }
+	if itemKey.itemSuffix ~= 0 then
+		check.withoutSuffix = RaisedByItemStats(KeyLink(itemKey, 0))
+	end
+	return check
+end
+
+-- After the tooltip is read: does GetItemStats agree with it?
+local function CheckItemStatsAfter(check, itemKey, fromTooltip)
+	if not (check and measure) then
+		return
+	end
+	measure.checked = measure.checked + 1
+	if SameSet(check.withSuffix, fromTooltip) then
+		measure.agree = measure.agree + 1
+	else
+		measure.differ = measure.differ + 1
+		measure.example = measure.example or string.format("item %d suffix %d: tooltip %s, item stats %s",
+			itemKey.itemID, itemKey.itemSuffix, SetText(fromTooltip), SetText(check.withSuffix))
+	end
+	if check.withoutSuffix then
+		measure.suffixItems = measure.suffixItems + 1
+		if not SameSet(check.withSuffix, check.withoutSuffix) then
+			measure.suffixChanged = measure.suffixChanged + 1
+		end
+	end
 end
 
 monitor:SetScript("OnUpdate", function()
@@ -205,6 +290,13 @@ local function ReportMeasure(how)
 	Say(string.format("test %s: search %s in %.1f s. In all: %s.", VERSION, how, GetTimePreciseSec() - m.start, CountsText(m.total)))
 	Say(string.format("Longest frame %.2f s, of it the addon %.3f s (%s). Slowest calls, ms: %s.",
 		m.worstGap, worst.addon, CountsText(worst), #calls > 0 and table.concat(calls, ", ") or "none"))
+	local slowItem = "none"
+	if m.slowItem then
+		local info = C_AuctionHouse.GetItemKeyInfo(m.slowItem)
+		slowItem = string.format("item %d suffix %d (%s)", m.slowItem.itemID, m.slowItem.itemSuffix, info and info.itemName or "?")
+	end
+	Say(string.format("Item stats vs tooltip: %d checked, %d agree, %d differ%s. Suffix changed item stats for %d of %d suffixed items. Slowest tooltip: %s.",
+		m.checked, m.agree, m.differ, m.example and (" (first: " .. m.example .. ")") or "", m.suffixChanged, m.suffixItems, slowItem))
 end
 
 --------------------------------------------------------------------------------
@@ -296,10 +388,16 @@ local function ReadStats(entry)
 		return
 	end
 	Count("reads")
+	local check = CheckItemStatsBefore(itemKey)
+	local slowestBefore = measure and measure.slowest.tooltip
 	local tooltip = Measured("tooltip", C_TooltipInfo.GetItemKey, itemID, itemKey.itemLevel, itemKey.itemSuffix, C_AuctionHouse.GetItemKeyRequiredLevel(itemKey))
+	if measure and measure.slowest.tooltip ~= slowestBefore then
+		measure.slowItem = itemKey
+	end
 	if tooltip and tooltip.lines then
 		entry.stats = ns.RaisedStats(tooltip.lines, linePatterns)
 		statsCache[entry.key] = entry.stats
+		CheckItemStatsAfter(check, itemKey, entry.stats)
 	else
 		-- Left out of this search, but not remembered: the next search reads it again.
 		entry.stats = NO_STATS
