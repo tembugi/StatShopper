@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- chat line about a changed auction house uses this, which /reload picks up.
-local VERSION = "0.1.6"
+local VERSION = "0.2.0"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
@@ -27,6 +27,15 @@ local FRAME_BUDGET = 0.004
 local MAX_ITEM_LOADS = 30
 -- Seconds between redraws of the list while matches still come in.
 local REDRAW_INTERVAL = 0.25
+-- An ending the addon hasn't learned is learned from one real auction (see ReadStats): the
+-- server is asked for one row's auctions, as clicking the row would. One request at a time,
+-- QUERY_INTERVAL seconds apart: below the server's limit of 100 a minute.
+local QUERY_INTERVAL = 0.7
+-- Seconds to wait for a row's auctions before trying another row with the same ending.
+local QUERY_TIMEOUT = 10
+-- Rows tried per ending in a search; then the ending waits for the next search.
+local MAX_TRIES = 3
+local QUERY_SORTS = { { sortOrder = Enum.AuctionHouseSortOrder.Buyout, reverseSort = false } }
 
 -- The values the list's sorts compare, by Blizzard's sort order. A browse list sorts by Price
 -- (the lowest buyout) and Name; Level, the extra column of containers, consumables and
@@ -53,7 +62,7 @@ local filterButton -- the search bar's Filter dropdown, with Blizzard's red X (C
 local searchStats -- the stats ticked when the last search was sent; nil when none were
 -- The stat-filtered search whose results are on screen, or nil:
 --   stats     the stats it was sent with
---   entries   every result so far, in arrival order: { key, result, order, stats, name }
+--   entries   every result so far, in arrival order: { key, result, order, stats, name, own }
 --   byKey     ResultKey -> entry
 --   complete  true once every page of results has arrived
 --   shown     the list handed to the results frame
@@ -90,6 +99,10 @@ local itemWaits = {} -- itemID -> { entries = waiting for the item's data, loadi
 local loadQueue = NewQueue() -- itemIDs to ask the server about
 local loadsInFlight = 0
 local keyWaits = {} -- itemID -> entries waiting for the auction house's info on their item key
+local endingQueue = NewQueue() -- endings to learn, in the order the search met them
+local endingWaits = {} -- ending -> { entries = waiting for it, tried = ResultKey -> true, tries }
+local asking -- { ending, itemKey, sentAt } while the server is asked for a row's auctions
+local lastQuery = -math.huge -- GetTime() of the last request; the spacing holds across searches
 local redrawPending, lastRedraw = false, 0
 local spinnerShown -- the addon shows Blizzard's spinner in place of "No results"
 
@@ -105,7 +118,8 @@ local Guarded -- runs addon code inside Blizzard's without breaking it (defined 
 --------------------------------------------------------------------------------
 
 local function IsWorking()
-	return search ~= nil and (not IsEmpty(readQueue) or not IsEmpty(loadQueue) or loadsInFlight > 0 or not search.complete)
+	return search ~= nil and (not IsEmpty(readQueue) or not IsEmpty(loadQueue) or loadsInFlight > 0
+		or asking ~= nil or not IsEmpty(endingQueue) or not search.complete)
 end
 
 -- Blizzard's list says "No results" once every page has arrived, and shows its loading
@@ -136,6 +150,9 @@ local function StopSearch()
 	loadQueue = NewQueue()
 	loadsInFlight = 0
 	keyWaits = {}
+	endingQueue = NewQueue()
+	endingWaits = {}
+	asking = nil
 	redrawPending = false
 	events:UnregisterAllEvents()
 	worker:Hide()
@@ -169,20 +186,31 @@ local function WaitForKeyInfo(itemID, entry)
 	events:RegisterEvent("ITEM_KEY_ITEM_INFO_RECEIVED")
 end
 
+local function WaitForEnding(ending, entry)
+	local wait = endingWaits[ending]
+	if not wait then
+		wait = { entries = {}, tried = {}, tries = 0 }
+		endingWaits[ending] = wait
+		Push(endingQueue, ending)
+	end
+	wait.entries[#wait.entries + 1] = entry
+	worker:Show()
+end
+
 local function IsMatch(entry)
 	return entry.stats ~= nil and ns.HasAll(entry.stats, search.stats)
 end
 
--- Reads the stats an entry's item raises from the game's stat table for the item
--- (C_Item.GetItemStats). An item whose data isn't on the client yet waits for it, and the
--- auction house's info on the item key gives the name the list shows and sorts by; a listing it
--- can't name stays out of the results.
--- Never from a tooltip: the first tooltip in a session with random suffix 14328 stalled the game
--- for 14.2 s inside C_TooltipInfo.GetItemKey (0.1.0 to 0.1.4), and the addon must never freeze
--- the game. GetItemStats never took a millisecond. It knows the item itself, not what a random
--- suffix adds, but in 0.1.5's in-game check (6007 items) it matched the item's tooltip every
--- time, and no suffix added stats, on any of 4856 suffixed items. The one exception, suffix
--- 14328 (71 listings), adds Stamina that this doesn't see: reading it is what stalls the game.
+-- Reads the stats an entry's item raises from the game's stat table (C_Item.GetItemStats). An
+-- item whose data isn't on the client yet waits for it, and the auction house's info on the
+-- item key gives the name the list shows and sorts by; a listing it can't name stays out.
+-- Never from a tooltip: the first tooltip in a session with random ending 14328 ("of the
+-- Physician") stalled the game for 14.2 s inside C_TooltipInfo.GetItemKey (0.1.0 to 0.1.4), and
+-- the addon must never freeze the game. The item's own stat table doesn't have what a random
+-- ending ("of the Whale") adds, and neither has the row: its item key holds only the ending's
+-- number, while the stats come with a bonus in the item link of each auction. So an ending is
+-- learned once from one real auction (see Ask), saved for the account, and given to every item
+-- with it. Until then the item matches by its own stats.
 local function ReadStats(entry)
 	local itemKey = entry.result.itemKey
 	local itemID = itemKey.itemID
@@ -203,8 +231,118 @@ local function ReadStats(entry)
 	end
 	entry.name = info.itemName
 	nameCache[entry.key] = info.itemName
-	entry.stats = ns.RaisedByItemStats(C_Item.GetItemStats("item:" .. itemID))
-	statsCache[entry.key] = entry.stats
+	local own = C_Item.GetItemStats("item:" .. itemID)
+	local ending = itemKey.itemSuffix
+	local adds = ending ~= 0 and FindMyStatsAccountDB.endings[ending]
+	if ending == 0 or adds then
+		entry.stats = ns.RaisedByItemStats(own, adds or nil)
+		statsCache[entry.key] = entry.stats
+		return
+	end
+	entry.own = own
+	entry.stats = ns.RaisedByItemStats(own)
+	WaitForEnding(ending, entry)
+end
+
+-- An ending was learned: the entries waiting for it get what it adds.
+local function ApplyEnding(ending, adds)
+	local wait = endingWaits[ending]
+	endingWaits[ending] = nil
+	if not wait then
+		return
+	end
+	for _, entry in ipairs(wait.entries) do
+		entry.stats = ns.RaisedByItemStats(entry.own, adds)
+		entry.own = nil
+		statsCache[entry.key] = entry.stats
+		if IsMatch(entry) then
+			redrawPending = true
+		end
+	end
+	worker:Show()
+end
+
+-- The next row with the ending that hasn't been asked about in this search, or nil.
+local function UntriedEntry(wait)
+	for _, entry in ipairs(wait.entries) do
+		if not wait.tried[entry.key] then
+			return entry
+		end
+	end
+end
+
+-- What a row's ending adds, from the first of its auctions with a real link: what that link's
+-- stat table has beyond the item's own. Nil while no auction with a link is there.
+local function LearnFrom(itemKey)
+	for index = 1, C_AuctionHouse.GetNumItemSearchResults(itemKey) do
+		local auction = C_AuctionHouse.GetItemSearchResultInfo(itemKey, index)
+		local withEnding = auction and auction.itemLink and C_Item.GetItemStats(auction.itemLink)
+		if withEnding then
+			return ns.EndingAdds(withEnding, C_Item.GetItemStats("item:" .. itemKey.itemID))
+		end
+	end
+end
+
+-- The row asked about answered (adds), or gave nothing to learn from: sold, or no answer in
+-- QUERY_TIMEOUT. Then another row with the same ending is tried, up to MAX_TRIES; after that the
+-- ending's items keep their own stats until the next search.
+local function FinishAsking(adds)
+	local ending = asking.ending
+	asking = nil
+	if adds then
+		FindMyStatsAccountDB.endings[ending] = adds
+		ApplyEnding(ending, adds)
+		return
+	end
+	local wait = endingWaits[ending]
+	if wait and wait.tries < MAX_TRIES and UntriedEntry(wait) then
+		Push(endingQueue, ending)
+	else
+		endingWaits[ending] = nil
+	end
+end
+
+-- Asks the server for a row with the next ending to learn, or checks on the row asked about.
+-- Asking waits while the player views an item: opening it sends the player's own request, which
+-- goes first. A row the auction house has already searched (the player opened it) needs no
+-- request.
+local function Ask()
+	if asking then
+		local adds = C_AuctionHouse.HasSearchResults(asking.itemKey) and LearnFrom(asking.itemKey)
+		if adds then
+			FinishAsking(adds)
+		elseif GetTime() - asking.sentAt >= QUERY_TIMEOUT
+			or (C_AuctionHouse.HasFullItemSearchResults(asking.itemKey) and C_AuctionHouse.GetNumItemSearchResults(asking.itemKey) == 0) then
+			FinishAsking(nil)
+		end
+		return
+	end
+	if IsEmpty(endingQueue) or auctionFrame:GetDisplayMode() ~= AuctionHouseFrameDisplayMode.Buy then
+		return
+	end
+	local ending = endingQueue[endingQueue.head]
+	local wait = endingWaits[ending]
+	local entry = wait and UntriedEntry(wait)
+	if not entry then
+		Take(endingQueue)
+		endingWaits[ending] = nil
+		return
+	end
+	local itemKey = entry.result.itemKey
+	local known = C_AuctionHouse.HasSearchResults(itemKey) and LearnFrom(itemKey)
+	if not known and (GetTime() - lastQuery < QUERY_INTERVAL or not C_AuctionHouse.IsThrottledMessageSystemReady()) then
+		return
+	end
+	Take(endingQueue)
+	wait.tries = wait.tries + 1
+	wait.tried[entry.key] = true
+	asking = { ending = ending, itemKey = itemKey, sentAt = GetTime() }
+	if known then
+		FinishAsking(known)
+		return
+	end
+	lastQuery = GetTime()
+	C_AuctionHouse.SendSearchQuery(itemKey, QUERY_SORTS, false)
 end
 
 -- Takes in a page of results. A result already there (the same search re-sorted) takes the
@@ -285,14 +423,15 @@ local function IssueLoads()
 	end
 end
 
--- One frame's work: ask about more items, read items until the frame's budget is spent, and
--- redraw when matches came in (at most every REDRAW_INTERVAL while more are coming).
+-- One frame's work: ask about more items and endings, read items until the frame's budget is
+-- spent, and redraw when matches came in (at most every REDRAW_INTERVAL while more are coming).
 local function Work()
 	if not search then
 		worker:Hide()
 		return
 	end
 	IssueLoads()
+	Ask()
 	local deadline = GetTimePreciseSec() + FRAME_BUDGET
 	while not IsEmpty(readQueue) and GetTimePreciseSec() < deadline do
 		local entry = Take(readQueue)
@@ -311,8 +450,10 @@ local function Work()
 			Redraw()
 		end
 	end
-	-- Asleep until an event brings more to do: item data, a page, or item key info.
-	if IsEmpty(readQueue) and (IsEmpty(loadQueue) or loadsInFlight >= MAX_ITEM_LOADS) and not redrawPending then
+	-- Asleep until an event brings more to do (item data, a page, item key info), but awake
+	-- while endings are to be learned: asking is paced and checked each frame.
+	if IsEmpty(readQueue) and (IsEmpty(loadQueue) or loadsInFlight >= MAX_ITEM_LOADS) and not redrawPending
+		and not asking and IsEmpty(endingQueue) then
 		worker:Hide()
 	end
 	UpdateEmptyList()
@@ -520,7 +661,8 @@ local function FindPieces()
 	for _, group in ipairs(ns.STAT_GROUPS) do
 		groupsNamed = groupsNamed and type(_G[group.name]) == "string"
 	end
-	if frame and frame.SendBrowseQuery and frame.GetSortsForContext and frame.GetBrowseSearchContext
+	if frame and frame.SendBrowseQuery and frame.GetSortsForContext and frame.GetBrowseSearchContext and frame.GetDisplayMode
+		and AuctionHouseFrameDisplayMode and AuctionHouseFrameDisplayMode.Buy
 		and results and results.UpdateBrowseResults and results.Reset and results.SetSortOrder and results.GetNumBrowseResults
 		and list and list.RefreshScrollFrame and list.DirtyScrollFrame and list.ResultsText and list.LoadingSpinner
 		and searchBar and searchBar.UpdateClearFiltersButton
@@ -568,6 +710,7 @@ end
 
 EventUtil.ContinueOnAddOnLoaded(addonName, function()
 	FindMyStatsDB = ns.NormalizeSaved(FindMyStatsDB)
+	FindMyStatsAccountDB = ns.NormalizeAccount(FindMyStatsAccountDB, (select(2, GetBuildInfo())))
 	EventUtil.ContinueOnAddOnLoaded(AUCTION_UI, function()
 		Guarded(Install)
 	end)

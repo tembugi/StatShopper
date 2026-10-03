@@ -1,11 +1,12 @@
 ## Interface: 16001
 ## Title: Find My Stats
 ## Notes: Adds stats to the auction house's Filter menu. A search then shows only gear with every stat you ticked.
-## Version: 0.1.6
+## Version: 0.2.0
 ## Author: tembugi
 ## Category: Auction & Economy
 ## IconAtlas: Auctioneer
 ## AllowLoadGameType: camelot
+## SavedVariables: FindMyStatsAccountDB
 ## SavedVariablesPerCharacter: FindMyStatsDB
 
 Stats.lua

@@ -70,6 +70,34 @@ Test("the game's stat table gives the stats an item raises", function()
 	SameSet(ns.RaisedByItemStats({}), {}, "an item without stats")
 end)
 
+-- What the game's stat table gave in game (2026-10-04) for Watcher's Cap: the item alone, and a
+-- real auction's link with "of the Whale" and with "of the Physician".
+local CAP = { RESISTANCE0_NAME = 36 }
+local CAP_OF_THE_WHALE = { RESISTANCE0_NAME = 36, ITEM_MOD_STAMINA_SHORT = 8, ITEM_MOD_SPIRIT_SHORT = 8 }
+local CAP_OF_THE_PHYSICIAN = {
+	RESISTANCE0_NAME = 36,
+	ITEM_MOD_INTELLECT_SHORT = 5,
+	ITEM_MOD_STAMINA_SHORT = 9,
+	ITEM_MOD_SPELL_HEALING_DONE_SHORT = 8,
+	ITEM_MOD_SPELL_DAMAGE_DONE_SHORT = 3,
+}
+
+Test("an ending adds what the real auction has beyond the item itself", function()
+	SameSet(ns.EndingAdds(CAP_OF_THE_WHALE, CAP), SetOf("ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"), "of the Whale")
+	SameSet(ns.EndingAdds(CAP_OF_THE_PHYSICIAN, CAP), SetOf("ITEM_MOD_INTELLECT_SHORT", "ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPELL_HEALING_DONE_SHORT", "ITEM_MOD_SPELL_DAMAGE_DONE_SHORT"), "of the Physician, stats not in the menu kept too")
+	SameSet(ns.EndingAdds({ ITEM_MOD_STAMINA_SHORT = 13 }, { ITEM_MOD_STAMINA_SHORT = 5 }), SetOf("ITEM_MOD_STAMINA_SHORT"), "more of a stat the item has")
+	SameSet(ns.EndingAdds(CAP, CAP), {}, "an ending that adds nothing")
+	SameSet(ns.EndingAdds(CAP_OF_THE_WHALE, nil), SetOf("RESISTANCE0_NAME", "ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"), "no table for the item")
+	SameSet(ns.EndingAdds(nil, CAP), {}, "no table for the auction")
+end)
+
+Test("an item raises its own stats and what its ending adds", function()
+	SameSet(ns.RaisedByItemStats(CAP, ns.EndingAdds(CAP_OF_THE_WHALE, CAP)), SetOf("STAMINA", "SPIRIT"), "Watcher's Cap of the Whale")
+	SameSet(ns.RaisedByItemStats({ ITEM_MOD_STRENGTH_SHORT = 4 }, SetOf("ITEM_MOD_STAMINA_SHORT")), SetOf("STRENGTH", "STAMINA"), "own stats and the ending's")
+	SameSet(ns.RaisedByItemStats(nil, SetOf("ITEM_MOD_INTELLECT_SHORT")), SetOf("INTELLECT"), "no table, ending only")
+	SameSet(ns.RaisedByItemStats(CAP, {}), {}, "an ending that adds nothing")
+end)
+
 Test("an item matches only with every wanted stat", function()
 	local raised = SetOf("STRENGTH", "STAMINA")
 	Equal(ns.HasAll(raised, SetOf("STRENGTH")), true, "one of them")
@@ -200,6 +228,53 @@ Test("broken and leftover saved data is dropped", function()
 	Equal(clean.version, nil, "leftover field")
 	clean = ns.NormalizeSaved({ stats = "STRENGTH" })
 	Equal(next(clean.stats), nil, "stats that aren't a table")
+end)
+
+Test("learned endings start empty, with the build", function()
+	for _, old in ipairs({ false, 7, "text", {} }) do
+		local clean = ns.NormalizeAccount(old, "70205")
+		Equal(clean.format, 1, "format")
+		Equal(clean.build, "70205", "build")
+		Equal(next(clean.endings), nil, "no endings from " .. tostring(old))
+	end
+	Equal(next(ns.NormalizeAccount(nil, "70205").endings), nil, "no endings from nothing")
+end)
+
+Test("learned endings are kept on the same build", function()
+	local clean = ns.NormalizeAccount({ format = 1, build = "70205", endings = {
+		[14301] = SetOf("ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"),
+		[200] = {},
+	} }, "70205")
+	SameSet(clean.endings[14301], SetOf("ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"), "of the Whale")
+	SameSet(clean.endings[200], {}, "an ending that adds nothing is still known")
+end)
+
+Test("learned endings are dropped on another build or format", function()
+	local saved = { format = 1, build = "70205", endings = { [14301] = SetOf("ITEM_MOD_STAMINA_SHORT") } }
+	Equal(next(ns.NormalizeAccount(saved, "70300").endings), nil, "a game update")
+	saved.format = 0
+	Equal(next(ns.NormalizeAccount(saved, "70205").endings), nil, "an older format")
+end)
+
+Test("broken learned endings are dropped", function()
+	local clean = ns.NormalizeAccount({
+		format = 1,
+		build = "70205",
+		endings = {
+			[14301] = { ITEM_MOD_STAMINA_SHORT = true, ITEM_MOD_SPIRIT_SHORT = "yes", [5] = true },
+			[0] = SetOf("ITEM_MOD_STAMINA_SHORT"),
+			[1.5] = SetOf("ITEM_MOD_STAMINA_SHORT"),
+			["14301"] = SetOf("ITEM_MOD_STAMINA_SHORT"),
+			[99] = "ITEM_MOD_STAMINA_SHORT",
+		},
+		leftover = true,
+	}, "70205")
+	SameSet(clean.endings[14301], SetOf("ITEM_MOD_STAMINA_SHORT"), "only names marked true")
+	Equal(clean.endings[0], nil, "no ending")
+	Equal(clean.endings[1.5], nil, "not a whole number")
+	Equal(clean.endings["14301"], nil, "not a number")
+	Equal(clean.endings[99], nil, "adds that aren't a table")
+	Equal(clean.leftover, nil, "leftover field")
 end)
 
 if failures > 0 then

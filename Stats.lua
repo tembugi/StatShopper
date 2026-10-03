@@ -26,24 +26,40 @@ for _, group in ipairs(ns.STAT_GROUPS) do
 	end
 end
 
--- The stats the game's stat table for an item raises, as a set of stat keys. The table comes
--- from C_Item.GetItemStats: amounts keyed by the global string names the menu shows
--- (ITEM_MOD_STRENGTH_SHORT and the like; in 0.1.5's in-game check it matched the item's tooltip
--- on 6007 of 6007 items). Anything that isn't a positive number is ignored; no table means no
--- stats.
-function ns.RaisedByItemStats(itemStats)
+-- The stats an item raises, as a set of stat keys: those with a positive amount in the game's
+-- stat table for the item, plus those its random ending adds. The table comes from
+-- C_Item.GetItemStats: amounts keyed by the global string names the menu shows
+-- (ITEM_MOD_STRENGTH_SHORT and the like). endingAdds is a set of those names (see EndingAdds),
+-- or nil for an item without an ending. No table means no stats of its own.
+function ns.RaisedByItemStats(itemStats, endingAdds)
 	local raised = {}
-	if type(itemStats) == "table" then
-		for _, group in ipairs(ns.STAT_GROUPS) do
-			for _, stat in ipairs(group.stats) do
-				local amount = itemStats[stat.label]
-				if type(amount) == "number" and amount > 0 then
-					raised[stat.key] = true
-				end
+	for _, group in ipairs(ns.STAT_GROUPS) do
+		for _, stat in ipairs(group.stats) do
+			local amount = type(itemStats) == "table" and itemStats[stat.label]
+			if (type(amount) == "number" and amount > 0) or (endingAdds and endingAdds[stat.label]) then
+				raised[stat.key] = true
 			end
 		end
 	end
 	return raised
+end
+
+-- What a random ending ("of the Whale") adds to an item, as a set of stat names: those with a
+-- higher amount in the stat table of a real auction's link (which carries the ending) than in
+-- the item's own (C_Item.GetItemStats("item:<id>"), which doesn't). An ending adds the same
+-- stats to every item, so one auction tells them all. Every stat name is kept, not only the ones
+-- in the menu, so stats added to the menu later need no new learning.
+function ns.EndingAdds(withEnding, withoutEnding)
+	local adds = {}
+	if type(withEnding) == "table" then
+		for name, amount in pairs(withEnding) do
+			local own = type(withoutEnding) == "table" and withoutEnding[name]
+			if type(name) == "string" and type(amount) == "number" and amount > (type(own) == "number" and own or 0) then
+				adds[name] = true
+			end
+		end
+	end
+	return adds
 end
 
 -- True when the item raises every wanted stat.
@@ -128,6 +144,37 @@ function ns.NormalizeSaved(old)
 		for key, ticked in pairs(old.stats) do
 			if ns.KNOWN_STATS[key] and ticked == true then
 				clean.stats[key] = true
+			end
+		end
+	end
+	return clean
+end
+
+-- The account-wide saved layout's version (FindMyStatsAccountDB). Raise it only when a change
+-- stores the endings differently, and convert the older layout in NormalizeAccount.
+local ACCOUNT_FORMAT = 1
+
+-- Runs on every load with the saved FindMyStatsAccountDB and the game's build number, and
+-- returns it rebuilt: the random endings learned so far, by the auction house's ending number,
+-- each with the stat names it adds (a set, possibly empty). They are kept only for the build they
+-- were learned on: a game update may change what an ending adds, and they are learned again.
+-- Anything else is dropped.
+function ns.NormalizeAccount(old, build)
+	local clean = {
+		format = ACCOUNT_FORMAT,
+		build = build,
+		endings = {},
+	}
+	if type(old) == "table" and old.format == ACCOUNT_FORMAT and old.build == build and type(old.endings) == "table" then
+		for ending, adds in pairs(old.endings) do
+			if type(ending) == "number" and ending ~= 0 and ending % 1 == 0 and type(adds) == "table" then
+				local kept = {}
+				for name, added in pairs(adds) do
+					if type(name) == "string" and added == true then
+						kept[name] = true
+					end
+				end
+				clean.endings[ending] = kept
 			end
 		end
 	end
