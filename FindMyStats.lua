@@ -1,8 +1,8 @@
 local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
--- chat line about a changed auction house uses this, which /reload picks up.
-local VERSION = "0.1.1"
+-- chat lines use this, which /reload picks up.
+local VERSION = "0.1.2"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
@@ -19,9 +19,10 @@ local GEAR_CLASSES = {
 }
 local NO_STATS = {}
 
--- Reading items stops for the frame after this many milliseconds, so even a search of the
--- whole auction house never stalls the game.
-local FRAME_BUDGET_MS = 4
+-- Work on items stops for the frame after this many seconds, so even a search of the whole
+-- auction house never stalls the game. Timed with GetTimePreciseSec: debugprofilestop counts
+-- from the last debugprofilestart, which any addon may call.
+local FRAME_BUDGET = 0.004
 -- Items the addon asks the server about at a time. 0.1.0 asked about every item of a search at
 -- once, and the game stalled for seconds.
 local MAX_ITEM_LOADS = 30
@@ -42,8 +43,12 @@ local SORT_VALUES = {
 
 -- Every chat line starts with the addon's name in gold. The addon writes to chat only when
 -- something stopped working: what stopped, in red, then what the player can do.
+local function Say(message)
+	print(NORMAL_FONT_COLOR:WrapTextInColorCode(ADDON_TITLE) .. ": " .. message)
+end
+
 local function SayProblem(problem, advice)
-	print(NORMAL_FONT_COLOR:WrapTextInColorCode(ADDON_TITLE) .. ": " .. RED_FONT_COLOR:WrapTextInColorCode(problem) .. " " .. advice)
+	Say(RED_FONT_COLOR:WrapTextInColorCode(problem) .. " " .. advice)
 end
 
 local auctionFrame -- AuctionHouseFrame, once the auction house has loaded
@@ -86,11 +91,11 @@ local function IsEmpty(queue)
 	return queue.head > queue.tail
 end
 
-local readQueue = NewQueue() -- entries whose stats aren't read yet
+local workQueue = NewQueue() -- entries still needing their stats read, or a match its name
 local itemWaits = {} -- itemID -> { entries = waiting for the item's data, loading = asked for }
 local loadQueue = NewQueue() -- itemIDs to ask the server about
 local loadsInFlight = 0
-local unnamedItems = {} -- itemID -> true for matches whose name the auction house hasn't sent yet
+local unnamedItems = {} -- itemID -> matches whose name the auction house hasn't sent yet
 local redrawPending, lastRedraw = false, 0
 local spinnerShown -- the addon shows Blizzard's spinner in place of "No results"
 
@@ -102,11 +107,112 @@ local stopped -- true after an error: the filters stay off until /reload
 local Guarded -- runs addon code inside Blizzard's without breaking it (defined below)
 
 --------------------------------------------------------------------------------
+-- Test build only (0.1.2): measures where a filtered search's time goes and says it in chat
+-- when the search is done. The first search after a client restart stalled the game in 0.1.0
+-- and 0.1.1. Remove this section and the Measured/Count calls once the cause is known.
+--------------------------------------------------------------------------------
+
+local CALL_NAMES = {
+	instant = "item class",
+	cached = "cache check",
+	tooltip = "tooltip",
+	name = "name",
+	ask = "item ask",
+	refresh = "list refresh",
+}
+local CALL_ORDER = { "tooltip", "name", "cached", "instant", "ask", "refresh" }
+local COUNT_NAMES = { "pages", "results", "reads", "asks", "arrived", "names", "redraws" }
+
+local measure -- nil, or the search being measured
+local monitor = CreateFrame("Frame") -- times every frame while a search is measured
+monitor:Hide()
+
+local function NewCounts()
+	local counts = { addon = 0 }
+	for _, name in ipairs(COUNT_NAMES) do
+		counts[name] = 0
+	end
+	return counts
+end
+
+local function Count(name, amount)
+	if measure then
+		amount = amount or 1
+		measure.total[name] = measure.total[name] + amount
+		measure.frame[name] = measure.frame[name] + amount
+	end
+end
+
+-- Calls func and remembers the slowest such call of the search.
+local function Measured(callName, func, ...)
+	if not measure then
+		return func(...)
+	end
+	local start = GetTimePreciseSec()
+	local a, b, c, d, e, f, g = func(...)
+	local took = GetTimePreciseSec() - start
+	if took > (measure.slowest[callName] or 0) then
+		measure.slowest[callName] = took
+	end
+	return a, b, c, d, e, f, g
+end
+
+local function StartMeasuring()
+	local now = GetTimePreciseSec()
+	measure = { start = now, lastFrame = now, total = NewCounts(), frame = NewCounts(), slowest = {}, worstGap = 0 }
+	monitor:Show()
+end
+
+monitor:SetScript("OnUpdate", function()
+	if not measure then
+		monitor:Hide()
+		return
+	end
+	local now = GetTimePreciseSec()
+	local gap = now - measure.lastFrame
+	if gap > measure.worstGap then
+		measure.worstGap = gap
+		measure.worst = measure.frame
+	end
+	measure.lastFrame = now
+	measure.frame = NewCounts()
+end)
+
+local function CountsText(counts)
+	local parts = {}
+	for _, name in ipairs(COUNT_NAMES) do
+		if counts[name] > 0 then
+			parts[#parts + 1] = counts[name] .. " " .. name
+		end
+	end
+	return #parts > 0 and table.concat(parts, ", ") or "nothing"
+end
+
+local function ReportMeasure(how)
+	if not measure then
+		return
+	end
+	local m = measure
+	measure = nil
+	monitor:Hide()
+	local worst = m.worst or NewCounts()
+	local calls = {}
+	for _, callName in ipairs(CALL_ORDER) do
+		if m.slowest[callName] then
+			calls[#calls + 1] = string.format("%s %.0f", CALL_NAMES[callName], m.slowest[callName] * 1000)
+		end
+	end
+	Say(string.format("test %s: search %s in %.1f s. In all: %s.", VERSION, how, GetTimePreciseSec() - m.start, CountsText(m.total)))
+	Say(string.format("Longest frame %.2f s, of it the addon %.3f s (%s). Slowest calls, ms: %s.",
+		m.worstGap, worst.addon, CountsText(worst), #calls > 0 and table.concat(calls, ", ") or "none"))
+end
+
+--------------------------------------------------------------------------------
 -- Filtering the results
 --------------------------------------------------------------------------------
 
 local function IsWorking()
-	return search ~= nil and (not IsEmpty(readQueue) or not IsEmpty(loadQueue) or loadsInFlight > 0 or not search.complete)
+	return search ~= nil and (not IsEmpty(workQueue) or not IsEmpty(loadQueue) or loadsInFlight > 0 or not search.complete)
 end
 
 -- Blizzard's list says "No results" once every page has arrived, and shows its loading
@@ -128,11 +234,17 @@ local function UpdateEmptyList()
 		list.LoadingSpinner:Hide()
 		list.ResultsText:SetShown(empty and everyPageIn)
 	end
+	if search and not IsWorking() then
+		ReportMeasure("done")
+	end
 end
 
 local function StopSearch()
+	if search then
+		ReportMeasure("stopped before it was done")
+	end
 	search = nil
-	readQueue = NewQueue()
+	workQueue = NewQueue()
 	itemWaits = {}
 	loadQueue = NewQueue()
 	loadsInFlight = 0
@@ -149,7 +261,7 @@ local function StartSearch(stats)
 end
 
 local function Enqueue(entry)
-	Push(readQueue, entry)
+	Push(workQueue, entry)
 	worker:Show()
 end
 
@@ -163,23 +275,28 @@ local function WaitForItem(itemID, entry)
 	wait.entries[#wait.entries + 1] = entry
 end
 
+local function IsMatch(entry)
+	return entry.stats ~= nil and ns.HasAll(entry.stats, search.stats)
+end
+
 -- Reads the stats an entry's item raises from the tooltip the auction house shows for it
 -- (the same SetItemKey arguments Blizzard uses for a results row, random suffix included).
 -- An item whose data isn't on the client yet waits for it.
-local function ReadEntry(entry)
+local function ReadStats(entry)
 	local itemKey = entry.result.itemKey
 	local itemID = itemKey.itemID
-	local classID = select(6, C_Item.GetItemInfoInstant(itemID))
+	local classID = select(6, Measured("instant", C_Item.GetItemInfoInstant, itemID))
 	if classID and not GEAR_CLASSES[classID] then
 		entry.stats = NO_STATS
 		statsCache[entry.key] = NO_STATS
 		return
 	end
-	if not C_Item.IsItemDataCachedByID(itemID) then
+	if not Measured("cached", C_Item.IsItemDataCachedByID, itemID) then
 		WaitForItem(itemID, entry)
 		return
 	end
-	local tooltip = C_TooltipInfo.GetItemKey(itemID, itemKey.itemLevel, itemKey.itemSuffix, C_AuctionHouse.GetItemKeyRequiredLevel(itemKey))
+	Count("reads")
+	local tooltip = Measured("tooltip", C_TooltipInfo.GetItemKey, itemID, itemKey.itemLevel, itemKey.itemSuffix, C_AuctionHouse.GetItemKeyRequiredLevel(itemKey))
 	if tooltip and tooltip.lines then
 		entry.stats = ns.RaisedStats(tooltip.lines, linePatterns)
 		statsCache[entry.key] = entry.stats
@@ -189,44 +306,60 @@ local function ReadEntry(entry)
 	end
 end
 
+-- The item's name as the list shows it, for sorting by name. Nil until the auction house has
+-- the item key's info; ITEM_KEY_ITEM_INFO_RECEIVED says when it arrives.
+local function ReadName(entry)
+	Count("names")
+	local info = Measured("name", C_AuctionHouse.GetItemKeyInfo, entry.result.itemKey)
+	entry.name = info and info.itemName
+	nameCache[entry.key] = entry.name
+end
+
+-- One entry's work: its stats, then, for a match, its name.
+local function Process(entry)
+	if not entry.stats then
+		ReadStats(entry)
+	end
+	if not entry.name and IsMatch(entry) then
+		ReadName(entry)
+	end
+end
+
 -- Takes in a page of results. A result already there (the same search re-sorted) takes the
 -- fresher price and quantity.
 local function Merge(results)
+	Count("pages")
 	for _, result in ipairs(results) do
 		local key = ns.ResultKey(result.itemKey)
 		local entry = search.byKey[key]
 		if entry then
 			entry.result = result
 		else
+			Count("results")
 			entry = { key = key, result = result, order = #search.entries + 1, stats = statsCache[key], name = nameCache[key] }
 			search.byKey[key] = entry
 			search.entries[#search.entries + 1] = entry
-			if not entry.stats then
+			if not entry.stats or (not entry.name and IsMatch(entry)) then
 				Enqueue(entry)
 			end
 		end
 	end
 end
 
--- The item's name as the list shows it, for sorting by name. Nil until the auction house has
--- the item key's info; ITEM_KEY_ITEM_INFO_RECEIVED says when it arrives.
-local function NameOf(entry)
-	local info = C_AuctionHouse.GetItemKeyInfo(entry.result.itemKey)
-	local name = info and info.itemName
-	nameCache[entry.key] = name
-	return name
-end
-
 -- Hands the results frame the matches, sorted as its headers say, and redraws its list.
+-- Matches whose name hasn't arrived sort last until ITEM_KEY_ITEM_INFO_RECEIVED brings it.
 local function Redraw()
+	Count("redraws")
 	redrawPending = false
 	lastRedraw = GetTime()
 	local matching = ns.Matching(search.entries, search.stats)
 	wipe(unnamedItems)
 	for _, entry in ipairs(matching) do
-		entry.name = entry.name or NameOf(entry)
 		if not entry.name then
-			unnamedItems[entry.result.itemKey.itemID] = true
+			local itemID = entry.result.itemKey.itemID
+			local waiting = unnamedItems[itemID] or {}
+			waiting[#waiting + 1] = entry
+			unnamedItems[itemID] = waiting
 		end
 	end
 	if next(unnamedItems) then
@@ -241,7 +374,7 @@ local function Redraw()
 	end
 	search.shown = shown
 	resultsFrame.browseResults = shown
-	resultsFrame.ItemList:RefreshScrollFrame()
+	Measured("refresh", resultsFrame.ItemList.RefreshScrollFrame, resultsFrame.ItemList)
 	UpdateEmptyList()
 end
 
@@ -283,24 +416,25 @@ local function IssueLoads()
 			wait.loading = true
 			loadsInFlight = loadsInFlight + 1
 			events:RegisterEvent("ITEM_DATA_LOAD_RESULT")
-			C_Item.RequestLoadItemDataByID(itemID)
+			Count("asks")
+			Measured("ask", C_Item.RequestLoadItemDataByID, itemID)
 		end
 	end
 end
 
--- One frame's work: ask about more items, read items until the frame's budget is spent, and
--- redraw when matches came in (at most every REDRAW_INTERVAL while more are coming).
+-- One frame's work: ask about more items, work on entries until the frame's budget is spent,
+-- and redraw when matches came in (at most every REDRAW_INTERVAL while more are coming).
 local function Work()
 	if not search then
 		worker:Hide()
 		return
 	end
 	IssueLoads()
-	local deadline = debugprofilestop() + FRAME_BUDGET_MS
-	while not IsEmpty(readQueue) and debugprofilestop() < deadline do
-		local entry = Take(readQueue)
-		ReadEntry(entry)
-		if entry.stats and ns.HasAll(entry.stats, search.stats) then
+	local deadline = GetTimePreciseSec() + FRAME_BUDGET
+	while not IsEmpty(workQueue) and GetTimePreciseSec() < deadline do
+		local entry = Take(workQueue)
+		Process(entry)
+		if IsMatch(entry) then
 			redrawPending = true
 		end
 	end
@@ -313,7 +447,7 @@ local function Work()
 		end
 	end
 	-- Asleep until an event brings more to do: item data, a page, or item key info.
-	if IsEmpty(readQueue) and (IsEmpty(loadQueue) or loadsInFlight >= MAX_ITEM_LOADS) and not redrawPending then
+	if IsEmpty(workQueue) and (IsEmpty(loadQueue) or loadsInFlight >= MAX_ITEM_LOADS) and not redrawPending then
 		worker:Hide()
 	end
 	UpdateEmptyList()
@@ -328,6 +462,7 @@ local function OnItemData(itemID, success)
 	if not wait then
 		return
 	end
+	Count("arrived")
 	itemWaits[itemID] = nil
 	if wait.loading then
 		loadsInFlight = loadsInFlight - 1
@@ -346,12 +481,15 @@ local function OnItemData(itemID, success)
 	worker:Show()
 end
 
--- The auction house sends item key info for every row it shows; only a match still without
--- its name needs a redraw.
+-- The auction house sends item key info for every row it shows; only matches still without a
+-- name need it, and get their name read again.
 local function OnItemKeyInfo(itemID)
-	if unnamedItems[itemID] and OwnsList() then
-		redrawPending = true
-		worker:Show()
+	local waiting = unnamedItems[itemID]
+	if waiting and OwnsList() then
+		unnamedItems[itemID] = nil
+		for _, entry in ipairs(waiting) do
+			Enqueue(entry)
+		end
 	end
 end
 
@@ -397,6 +535,9 @@ end
 local function OnSearchSent()
 	searchStats = ns.Ticked(FindMyStatsDB.stats)
 	StopSearch()
+	if searchStats then
+		StartMeasuring()
+	end
 end
 
 -- A column header was clicked: Blizzard sends the search again in the new order. The matches
@@ -428,7 +569,12 @@ Guarded = function(func, ...)
 	if stopped then
 		return
 	end
-	if xpcall(func, CallErrorHandler, ...) then
+	local start = measure and GetTimePreciseSec()
+	local ok = xpcall(func, CallErrorHandler, ...)
+	if start and measure then
+		measure.frame.addon = measure.frame.addon + GetTimePreciseSec() - start
+	end
+	if ok then
 		return
 	end
 	stopped = true
