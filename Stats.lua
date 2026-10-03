@@ -64,20 +64,48 @@ function ns.HasAll(raised, wanted)
 	return true
 end
 
--- The results whose items raise every wanted stat, in their order, and how many results were
--- left out because their item's data is still loading. statsOf(itemKey) returns the stats an
--- item raises, or nil while its data loads.
-function ns.Filter(results, wanted, statsOf)
-	local shown, loading = {}, 0
-	for _, result in ipairs(results) do
-		local raised = statsOf(result.itemKey)
-		if raised == nil then
-			loading = loading + 1
-		elseif ns.HasAll(raised, wanted) then
-			shown[#shown + 1] = result
+-- What tells one result row from another: the item, its item level and its random suffix
+-- ("of the Bear"), as in the auction house's own item keys.
+function ns.ResultKey(itemKey)
+	return itemKey.itemID .. ":" .. itemKey.itemLevel .. ":" .. itemKey.itemSuffix .. ":" .. itemKey.battlePetSpeciesID
+end
+
+-- The entries whose items raise every wanted stat, in the order given. Entries whose stats
+-- aren't read yet (entry.stats is nil) are left out.
+function ns.Matching(entries, wanted)
+	local matching = {}
+	for _, entry in ipairs(entries) do
+		if entry.stats and ns.HasAll(entry.stats, wanted) then
+			matching[#matching + 1] = entry
 		end
 	end
-	return shown, loading
+	return matching
+end
+
+-- Sorts entries the way the auction house sorts its list: by each of its sorts in turn
+-- ({ sortOrder, reverseSort }, most important first), then by arrival (entry.order).
+-- valueOf[sortOrder](entry) gives the value a sort compares; a sort without one is skipped.
+-- An entry without a value (a name still loading) goes last either way.
+function ns.SortEntries(entries, sorts, valueOf)
+	table.sort(entries, function(a, b)
+		for _, sort in ipairs(sorts) do
+			local get = valueOf[sort.sortOrder]
+			if get then
+				local x, y = get(a), get(b)
+				if x ~= y then
+					if x == nil then
+						return false
+					elseif y == nil then
+						return true
+					elseif sort.reverseSort then
+						return x > y
+					end
+					return x < y
+				end
+			end
+		end
+		return a.order < b.order
+	end)
 end
 
 -- The ticked stats as a set of their own, or nil when none are ticked. A search keeps the

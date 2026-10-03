@@ -157,25 +157,80 @@ Test("an item matches only with every wanted stat", function()
 	Equal(ns.HasAll({}, SetOf("SPIRIT")), false, "no stats")
 end)
 
-Test("the filter keeps matches in order and counts what is still loading", function()
-	local stats = {
-		[1] = SetOf("STRENGTH", "STAMINA"),
-		[2] = SetOf("STRENGTH"),
-		[3] = nil, -- loading
-		[4] = SetOf("STAMINA", "STRENGTH", "SPIRIT"),
-		[5] = {},
+local function ItemKey(itemID, itemLevel, itemSuffix)
+	return { itemID = itemID, itemLevel = itemLevel or 0, itemSuffix = itemSuffix or 0, battlePetSpeciesID = 0 }
+end
+
+Test("results are told apart by item, item level and random suffix", function()
+	local plain = ns.ResultKey(ItemKey(100))
+	Equal(ns.ResultKey(ItemKey(100)), plain, "the same item key")
+	Equal(ns.ResultKey(ItemKey(100, 0, 1001)) ~= plain, true, "another suffix")
+	Equal(ns.ResultKey(ItemKey(100, 0, 1001)) ~= ns.ResultKey(ItemKey(100, 0, 1002)), true, "two suffixes")
+	Equal(ns.ResultKey(ItemKey(100, 45)) ~= plain, true, "another item level")
+	Equal(ns.ResultKey(ItemKey(10, 0)) ~= ns.ResultKey(ItemKey(1, 0)), true, "item 10 against item 1")
+end)
+
+Test("matching keeps entries with every wanted stat, in their order", function()
+	local entries = {
+		{ order = 1, stats = SetOf("STRENGTH", "STAMINA") },
+		{ order = 2, stats = SetOf("STRENGTH") },
+		{ order = 3, stats = nil }, -- not read yet
+		{ order = 4, stats = SetOf("STAMINA", "STRENGTH", "SPIRIT") },
+		{ order = 5, stats = {} },
 	}
-	local results = {}
-	for itemID = 1, 5 do
-		results[itemID] = { itemKey = { itemID = itemID } }
+	local matching = ns.Matching(entries, SetOf("STRENGTH", "STAMINA"))
+	Equal(#matching, 2, "matches")
+	Equal(matching[1], entries[1], "first match")
+	Equal(matching[2], entries[4], "second match")
+end)
+
+-- The auction house's sort orders (AuctionHouseSortOrder in the game's API documentation).
+local PRICE, NAME, LEVEL = 0, 1, 2
+local SORT_VALUES = {
+	[PRICE] = function(entry) return entry.price end,
+	[NAME] = function(entry) return entry.name end,
+}
+
+local function Entry(order, price, name)
+	return { order = order, price = price, name = name }
+end
+
+local function Orders(entries)
+	local orders = {}
+	for index, entry in ipairs(entries) do
+		orders[index] = entry.order
 	end
-	local shown, loading = ns.Filter(results, SetOf("STRENGTH", "STAMINA"), function(itemKey)
-		return stats[itemKey.itemID]
-	end)
-	Equal(#shown, 2, "matches")
-	Equal(shown[1], results[1], "first match")
-	Equal(shown[2], results[4], "second match")
-	Equal(loading, 1, "loading")
+	return table.concat(orders, ",")
+end
+
+Test("sorting by price, then name, as the browse list does by default", function()
+	local entries = { Entry(1, 500, "Brigade Boots"), Entry(2, 120, "Ridge Cleaver"), Entry(3, 500, "Augural Shroud"), Entry(4, 9000, "Lionheart Helm") }
+	ns.SortEntries(entries, { { sortOrder = PRICE, reverseSort = false }, { sortOrder = NAME, reverseSort = false } }, SORT_VALUES)
+	Equal(Orders(entries), "2,3,1,4", "cheapest first, same price by name")
+end)
+
+Test("a reversed sort puts the highest first", function()
+	local entries = { Entry(1, 500, "B"), Entry(2, 120, "A"), Entry(3, 9000, "C") }
+	ns.SortEntries(entries, { { sortOrder = PRICE, reverseSort = true }, { sortOrder = NAME, reverseSort = false } }, SORT_VALUES)
+	Equal(Orders(entries), "3,1,2", "dearest first")
+	ns.SortEntries(entries, { { sortOrder = NAME, reverseSort = true }, { sortOrder = PRICE, reverseSort = false } }, SORT_VALUES)
+	Equal(Orders(entries), "3,1,2", "names Z to A")
+end)
+
+Test("names still loading go last, and ties keep their arrival order", function()
+	local entries = { Entry(4, 100, nil), Entry(1, 100, "Bracers"), Entry(3, 100, nil), Entry(2, 100, "Amulet") }
+	ns.SortEntries(entries, { { sortOrder = NAME, reverseSort = false } }, SORT_VALUES)
+	Equal(Orders(entries), "2,1,3,4", "named first, then the rest by arrival")
+	ns.SortEntries(entries, { { sortOrder = NAME, reverseSort = true } }, SORT_VALUES)
+	Equal(Orders(entries), "1,2,3,4", "still last when reversed")
+end)
+
+Test("a sort the list can't compare is skipped", function()
+	local entries = { Entry(2, 300, "B"), Entry(1, 300, "A"), Entry(3, 100, "C") }
+	ns.SortEntries(entries, { { sortOrder = LEVEL, reverseSort = false }, { sortOrder = PRICE, reverseSort = false } }, SORT_VALUES)
+	Equal(Orders(entries), "3,1,2", "by price, then arrival")
+	ns.SortEntries(entries, {}, SORT_VALUES)
+	Equal(Orders(entries), "1,2,3", "no sorts: arrival")
 end)
 
 Test("a search keeps its own copy of the ticks", function()
