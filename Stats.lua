@@ -1,19 +1,19 @@
--- The rules that don't need the game: which stats there are, reading them from tooltip lines,
--- matching and the saved ticks. Tests/run.lua loads this file on its own.
+-- The rules that don't need the game: which stats there are, reading them from the game's stat
+-- table, matching, sorting and the saved ticks. Tests/run.lua loads this file on its own.
 local _, ns = ...
 
 -- The stat filters in the Filter menu, one submenu per group. `key` is the stat's saved name
--- (never change one: it is in players' saved data), `label` the game's string for its menu
--- entry and `line` the game's format for its tooltip line, such as "%c%s Strength".
+-- (never change one: it is in players' saved data). `label` is the game's global string for the
+-- stat: its menu entry, and the key of its amount in the game's stat table (C_Item.GetItemStats).
 ns.STAT_GROUPS = {
 	{
 		name = "STAT_CATEGORY_ATTRIBUTES",
 		stats = {
-			{ key = "STRENGTH", label = "ITEM_MOD_STRENGTH_SHORT", line = "ITEM_MOD_STRENGTH" },
-			{ key = "AGILITY", label = "ITEM_MOD_AGILITY_SHORT", line = "ITEM_MOD_AGILITY" },
-			{ key = "STAMINA", label = "ITEM_MOD_STAMINA_SHORT", line = "ITEM_MOD_STAMINA" },
-			{ key = "INTELLECT", label = "ITEM_MOD_INTELLECT_SHORT", line = "ITEM_MOD_INTELLECT" },
-			{ key = "SPIRIT", label = "ITEM_MOD_SPIRIT_SHORT", line = "ITEM_MOD_SPIRIT" },
+			{ key = "STRENGTH", label = "ITEM_MOD_STRENGTH_SHORT" },
+			{ key = "AGILITY", label = "ITEM_MOD_AGILITY_SHORT" },
+			{ key = "STAMINA", label = "ITEM_MOD_STAMINA_SHORT" },
+			{ key = "INTELLECT", label = "ITEM_MOD_INTELLECT_SHORT" },
+			{ key = "SPIRIT", label = "ITEM_MOD_SPIRIT_SHORT" },
 		},
 	},
 }
@@ -26,70 +26,11 @@ for _, group in ipairs(ns.STAT_GROUPS) do
 	end
 end
 
--- Turns one of the game's stat line formats into a pattern for a whole tooltip line that
--- captures the sign and the number. In every language the game writes the sign (%c) and then
--- the number (%s); only where the stat's name goes differs ("%c%s Strength", "힘 %c%s").
-function ns.LinePattern(format)
-	local pattern = format:gsub("[%^%$%(%)%.%[%]%*%+%-%?]", "%%%0")
-	pattern = pattern:gsub("%%c", "([+-])"):gsub("%%s", "([%%d.,]+)")
-	return "^" .. pattern .. "$"
-end
-
--- How much of each stat an item's tooltip lines add, by stat key: the sum of the game's whole
--- lines for the stat, where a minus sign subtracts ("-5 Spirit"). Thousands separators are
--- dropped from the number.
-function ns.StatAmounts(lines, patterns)
-	local amounts = {}
-	for _, line in ipairs(lines) do
-		local text = line.leftText
-		if type(text) == "string" then
-			for key, pattern in pairs(patterns) do
-				local sign, number = text:match(pattern)
-				if sign then
-					local amount = tonumber((number:gsub("[.,]", ""))) or 0
-					if sign == "-" then
-						amount = -amount
-					end
-					amounts[key] = (amounts[key] or 0) + amount
-				end
-			end
-		end
-	end
-	return amounts
-end
-
--- The stats that amounts raise, as a set of stat keys: those above zero.
-function ns.Raised(amounts)
-	local raised = {}
-	for key, amount in pairs(amounts) do
-		if amount > 0 then
-			raised[key] = true
-		end
-	end
-	return raised
-end
-
--- The stats an item's tooltip lines raise, as a set of stat keys.
-function ns.RaisedStats(lines, patterns)
-	return ns.Raised(ns.StatAmounts(lines, patterns))
-end
-
--- What a random suffix ("of the Bear") adds to an item, as a set of stat keys: the stats it
--- has more of with the suffix than without. A suffix adds the same stats to every item.
-function ns.SuffixStats(withSuffix, withoutSuffix)
-	local added = {}
-	for key, amount in pairs(withSuffix) do
-		if amount > (withoutSuffix[key] or 0) then
-			added[key] = true
-		end
-	end
-	return added
-end
-
 -- The stats the game's stat table for an item raises, as a set of stat keys. The table comes
 -- from C_Item.GetItemStats: amounts keyed by the global string names the menu shows
--- (ITEM_MOD_STRENGTH_SHORT and the like; 0.1.3's in-game check matched the tooltip on 5968 of
--- 6030 items). Anything that isn't a positive number is ignored; no table means no stats.
+-- (ITEM_MOD_STRENGTH_SHORT and the like; in 0.1.5's in-game check it matched the item's tooltip
+-- on 6007 of 6007 items). Anything that isn't a positive number is ignored; no table means no
+-- stats.
 function ns.RaisedByItemStats(itemStats)
 	local raised = {}
 	if type(itemStats) == "table" then

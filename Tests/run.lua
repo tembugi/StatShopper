@@ -43,41 +43,7 @@ local function SameSet(actual, expected, what)
 	end
 end
 
--- The game's tooltip line formats for the five attributes, copied from the Forever client's
--- global strings (BlizzardInterfaceResources, branch forever).
-local FORMATS = {
-	enUS = {
-		STRENGTH = "%c%s Strength",
-		AGILITY = "%c%s Agility",
-		STAMINA = "%c%s Stamina",
-		INTELLECT = "%c%s Intellect",
-		SPIRIT = "%c%s Spirit",
-	},
-	deDE = { STRENGTH = "%c%s Stärke" },
-	esES = { STRENGTH = "%c%s p. de fuerza" },
-	frFR = { STRENGTH = "%c%s Force" },
-	koKR = { STRENGTH = "힘 %c%s" },
-	ruRU = { STRENGTH = "%c%s к силе" },
-	zhCN = { STRENGTH = "%c%s 力量" },
-	zhTW = { STRENGTH = "%c%s力量" },
-}
-
-local PLUS, MINUS = 43, 45 -- the sign characters the game puts in for %c
-
--- A tooltip line the way the game fills in its format: the sign, then the number.
-local function Line(format, sign, number)
-	return { leftText = string.format(format, sign, number) }
-end
-
-local function Patterns(formats)
-	local patterns = {}
-	for key, format in pairs(formats) do
-		patterns[key] = ns.LinePattern(format)
-	end
-	return patterns
-end
-
-Test("every stat in the menu has a key, a label and a tooltip format", function()
+Test("every stat in the menu has a key and the game's name for it", function()
 	local seen = {}
 	for _, group in ipairs(ns.STAT_GROUPS) do
 		Equal(type(group.name), "string", "group name")
@@ -85,87 +51,9 @@ Test("every stat in the menu has a key, a label and a tooltip format", function(
 			Equal(seen[stat.key], nil, "key used once: " .. tostring(stat.key))
 			seen[stat.key] = true
 			Equal(ns.KNOWN_STATS[stat.key], true, "known stat " .. stat.key)
-			Equal(type(stat.label), "string", stat.key .. " label")
-			Equal(type(stat.line), "string", stat.key .. " line")
-			Equal(FORMATS.enUS[stat.key] ~= nil, true, stat.key .. " has a format in the tests")
+			Equal(type(stat.label) == "string" and stat.label:match("^ITEM_MOD_.+_SHORT$") ~= nil, true, stat.key .. " label")
 		end
 	end
-end)
-
-Test("a line pattern reads the sign and the number in every language", function()
-	for locale, formats in pairs(FORMATS) do
-		for key, format in pairs(formats) do
-			local pattern = ns.LinePattern(format)
-			local sign, number = Line(format, PLUS, "12").leftText:match(pattern)
-			Equal(sign, "+", locale .. " " .. key .. " sign")
-			Equal(number, "12", locale .. " " .. key .. " number")
-			sign, number = Line(format, MINUS, "5").leftText:match(pattern)
-			Equal(sign, "-", locale .. " " .. key .. " minus sign")
-			Equal(number, "5", locale .. " " .. key .. " minus number")
-		end
-	end
-end)
-
-Test("a line pattern matches only the whole line", function()
-	local pattern = ns.LinePattern(FORMATS.enUS.STRENGTH)
-	Equal(("12 Strength"):match(pattern), nil, "no sign")
-	Equal(("+12 Strength and more"):match(pattern), nil, "text after")
-	Equal(("Equip: +12 Strength"):match(pattern), nil, "text before")
-	Equal(("+12 Stamina"):match(pattern), nil, "another stat")
-	Equal(("+ Strength"):match(pattern), nil, "no number")
-end)
-
-Test("characters with a meaning in patterns are taken literally", function()
-	local pattern = ns.LinePattern(FORMATS.esES.STRENGTH)
-	Equal(("+12 p. de fuerza"):match(pattern), "+", "the dot itself")
-	Equal(("+12 px de fuerza"):match(pattern), nil, "any character in place of the dot")
-end)
-
-Test("an item raises the stats its lines add", function()
-	local formats = FORMATS.enUS
-	local lines = {
-		{ leftText = "Brigade Boots of the Bear" },
-		{ leftText = "Binds when equipped" },
-		Line(formats.STRENGTH, PLUS, "8"),
-		Line(formats.STAMINA, PLUS, "8"),
-		{ leftText = "Durability 50 / 50" },
-		{ leftText = "Requires Level 42" },
-	}
-	SameSet(ns.RaisedStats(lines, Patterns(formats)), SetOf("STRENGTH", "STAMINA"), "raised")
-end)
-
-Test("lowered and zero stats don't count", function()
-	local formats = FORMATS.enUS
-	local lines = {
-		Line(formats.SPIRIT, MINUS, "5"),
-		Line(formats.AGILITY, PLUS, "0"),
-		Line(formats.INTELLECT, PLUS, "10"),
-	}
-	SameSet(ns.RaisedStats(lines, Patterns(formats)), SetOf("INTELLECT"), "raised")
-end)
-
-Test("amounts add up per stat, a minus sign subtracting", function()
-	local formats = FORMATS.enUS
-	local lines = {
-		Line(formats.STAMINA, PLUS, "5"),
-		Line(formats.STAMINA, PLUS, "3"),
-		Line(formats.SPIRIT, MINUS, "4"),
-		Line(formats.STRENGTH, PLUS, "1,234"),
-		{ leftText = "Durability 50 / 50" },
-	}
-	local amounts = ns.StatAmounts(lines, Patterns(formats))
-	Equal(amounts.STAMINA, 8, "two Stamina lines")
-	Equal(amounts.SPIRIT, -4, "lowered Spirit")
-	Equal(amounts.STRENGTH, 1234, "thousands separator")
-	Equal(amounts.AGILITY, nil, "no Agility line")
-	SameSet(ns.Raised(amounts), SetOf("STAMINA", "STRENGTH"), "raised")
-end)
-
-Test("a suffix adds the stats it raises beyond the item without it", function()
-	SameSet(ns.SuffixStats({ STAMINA = 8 }, {}), SetOf("STAMINA"), "a suffix on a plain item")
-	SameSet(ns.SuffixStats({ STAMINA = 8, STRENGTH = 5 }, { STRENGTH = 5 }), SetOf("STAMINA"), "the item's own Strength isn't the suffix's")
-	SameSet(ns.SuffixStats({ STAMINA = 13 }, { STAMINA = 5 }), SetOf("STAMINA"), "one line for both: more than the item alone")
-	SameSet(ns.SuffixStats({ STAMINA = 5 }, { STAMINA = 5 }), {}, "nothing added")
 end)
 
 Test("the game's stat table gives the stats an item raises", function()
@@ -180,11 +68,6 @@ Test("the game's stat table gives the stats an item raises", function()
 	SameSet(raised, SetOf("STRENGTH", "STAMINA"), "raised")
 	SameSet(ns.RaisedByItemStats(nil), {}, "no table")
 	SameSet(ns.RaisedByItemStats({}), {}, "an item without stats")
-end)
-
-Test("lines without text are skipped", function()
-	local lines = { {}, { leftText = false }, Line(FORMATS.enUS.STRENGTH, PLUS, "3") }
-	SameSet(ns.RaisedStats(lines, Patterns(FORMATS.enUS)), SetOf("STRENGTH"), "raised")
 end)
 
 Test("an item matches only with every wanted stat", function()
