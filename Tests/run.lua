@@ -144,6 +144,44 @@ Test("lowered and zero stats don't count", function()
 	SameSet(ns.RaisedStats(lines, Patterns(formats)), SetOf("INTELLECT"), "raised")
 end)
 
+Test("amounts add up per stat, a minus sign subtracting", function()
+	local formats = FORMATS.enUS
+	local lines = {
+		Line(formats.STAMINA, PLUS, "5"),
+		Line(formats.STAMINA, PLUS, "3"),
+		Line(formats.SPIRIT, MINUS, "4"),
+		Line(formats.STRENGTH, PLUS, "1,234"),
+		{ leftText = "Durability 50 / 50" },
+	}
+	local amounts = ns.StatAmounts(lines, Patterns(formats))
+	Equal(amounts.STAMINA, 8, "two Stamina lines")
+	Equal(amounts.SPIRIT, -4, "lowered Spirit")
+	Equal(amounts.STRENGTH, 1234, "thousands separator")
+	Equal(amounts.AGILITY, nil, "no Agility line")
+	SameSet(ns.Raised(amounts), SetOf("STAMINA", "STRENGTH"), "raised")
+end)
+
+Test("a suffix adds the stats it raises beyond the item without it", function()
+	SameSet(ns.SuffixStats({ STAMINA = 8 }, {}), SetOf("STAMINA"), "a suffix on a plain item")
+	SameSet(ns.SuffixStats({ STAMINA = 8, STRENGTH = 5 }, { STRENGTH = 5 }), SetOf("STAMINA"), "the item's own Strength isn't the suffix's")
+	SameSet(ns.SuffixStats({ STAMINA = 13 }, { STAMINA = 5 }), SetOf("STAMINA"), "one line for both: more than the item alone")
+	SameSet(ns.SuffixStats({ STAMINA = 5 }, { STAMINA = 5 }), {}, "nothing added")
+end)
+
+Test("the game's stat table gives the stats an item raises", function()
+	local raised = ns.RaisedByItemStats({
+		ITEM_MOD_STRENGTH_SHORT = 8,
+		ITEM_MOD_STAMINA_SHORT = 5,
+		ITEM_MOD_SPIRIT_SHORT = -3,
+		ITEM_MOD_AGILITY_SHORT = 0,
+		ITEM_MOD_INTELLECT_SHORT = "7",
+		RESISTANCE0_NAME = 120,
+	})
+	SameSet(raised, SetOf("STRENGTH", "STAMINA"), "raised")
+	SameSet(ns.RaisedByItemStats(nil), {}, "no table")
+	SameSet(ns.RaisedByItemStats({}), {}, "an item without stats")
+end)
+
 Test("lines without text are skipped", function()
 	local lines = { {}, { leftText = false }, Line(FORMATS.enUS.STRENGTH, PLUS, "3") }
 	SameSet(ns.RaisedStats(lines, Patterns(FORMATS.enUS)), SetOf("STRENGTH"), "raised")

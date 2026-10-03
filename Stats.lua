@@ -35,18 +35,69 @@ function ns.LinePattern(format)
 	return "^" .. pattern .. "$"
 end
 
--- The stats an item's tooltip lines raise, as a set of stat keys. A line counts when it is
--- the game's whole line for a stat with a plus sign and a number above zero; a line that
--- lowers a stat ("-5 Spirit") doesn't.
-function ns.RaisedStats(lines, patterns)
-	local raised = {}
+-- How much of each stat an item's tooltip lines add, by stat key: the sum of the game's whole
+-- lines for the stat, where a minus sign subtracts ("-5 Spirit"). Thousands separators are
+-- dropped from the number.
+function ns.StatAmounts(lines, patterns)
+	local amounts = {}
 	for _, line in ipairs(lines) do
 		local text = line.leftText
 		if type(text) == "string" then
 			for key, pattern in pairs(patterns) do
 				local sign, number = text:match(pattern)
-				if sign == "+" and number:find("[1-9]") then
-					raised[key] = true
+				if sign then
+					local amount = tonumber((number:gsub("[.,]", ""))) or 0
+					if sign == "-" then
+						amount = -amount
+					end
+					amounts[key] = (amounts[key] or 0) + amount
+				end
+			end
+		end
+	end
+	return amounts
+end
+
+-- The stats that amounts raise, as a set of stat keys: those above zero.
+function ns.Raised(amounts)
+	local raised = {}
+	for key, amount in pairs(amounts) do
+		if amount > 0 then
+			raised[key] = true
+		end
+	end
+	return raised
+end
+
+-- The stats an item's tooltip lines raise, as a set of stat keys.
+function ns.RaisedStats(lines, patterns)
+	return ns.Raised(ns.StatAmounts(lines, patterns))
+end
+
+-- What a random suffix ("of the Bear") adds to an item, as a set of stat keys: the stats it
+-- has more of with the suffix than without. A suffix adds the same stats to every item.
+function ns.SuffixStats(withSuffix, withoutSuffix)
+	local added = {}
+	for key, amount in pairs(withSuffix) do
+		if amount > (withoutSuffix[key] or 0) then
+			added[key] = true
+		end
+	end
+	return added
+end
+
+-- The stats the game's stat table for an item raises, as a set of stat keys. The table comes
+-- from C_Item.GetItemStats: amounts keyed by the global string names the menu shows
+-- (ITEM_MOD_STRENGTH_SHORT and the like; 0.1.3's in-game check matched the tooltip on 5968 of
+-- 6030 items). Anything that isn't a positive number is ignored; no table means no stats.
+function ns.RaisedByItemStats(itemStats)
+	local raised = {}
+	if type(itemStats) == "table" then
+		for _, group in ipairs(ns.STAT_GROUPS) do
+			for _, stat in ipairs(group.stats) do
+				local amount = itemStats[stat.label]
+				if type(amount) == "number" and amount > 0 then
+					raised[stat.key] = true
 				end
 			end
 		end

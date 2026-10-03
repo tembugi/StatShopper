@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- chat lines use this, which /reload picks up.
-local VERSION = "0.1.4"
+local VERSION = "0.1.5"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
@@ -107,22 +107,24 @@ local stopped -- true after an error: the filters stay off until /reload
 local Guarded -- runs addon code inside Blizzard's without breaking it (defined below)
 
 --------------------------------------------------------------------------------
--- Test build only (0.1.2 to 0.1.4): times a filtered search's frames. In 0.1.4 it speaks only
--- when a frame took STALL seconds or more: the game stalled for 14 s in 0.1.0 to 0.1.3, inside
--- the tooltip call for one listing (see ReadStats). Remove this section and the
--- Measured/Count calls once the in-game test shows no stall.
+-- Test build only (0.1.2 to 0.1.5): times a filtered search's frames, and in 0.1.5 checks what
+-- reading stats without tooltips leaves out. After each filtered search it says three lines in
+-- chat. Remove this section and its Measured/Count/Diagnose calls after the test.
 --------------------------------------------------------------------------------
 
-local STALL = 1
+-- The random suffix whose first tooltip in a session stalled the game for 14.2 s (0.1.2 to
+-- 0.1.4). The check never reads a tooltip for an item with it.
+local STALLING_SUFFIX = 14328
 local CALL_NAMES = {
 	instant = "item class",
 	cached = "cache check",
 	keyInfo = "key info",
-	tooltip = "tooltip",
+	itemStats = "item stats",
 	ask = "item ask",
 	refresh = "list refresh",
+	tooltip = "check tooltip",
 }
-local CALL_ORDER = { "tooltip", "keyInfo", "cached", "instant", "ask", "refresh" }
+local CALL_ORDER = { "itemStats", "keyInfo", "cached", "instant", "ask", "refresh", "tooltip" }
 local COUNT_NAMES = { "pages", "results", "reads", "asks", "arrived", "waits", "redraws" }
 
 local measure -- nil, or the search being measured
@@ -145,8 +147,8 @@ local function Count(name, amount)
 	end
 end
 
--- Calls func and remembers the slowest such call of the search, and for the tooltip, its item.
-local function Measured(callName, subject, func, ...)
+-- Calls func and remembers the slowest such call of the search.
+local function Measured(callName, func, ...)
 	if not measure then
 		return func(...)
 	end
@@ -155,16 +157,16 @@ local function Measured(callName, subject, func, ...)
 	local took = GetTimePreciseSec() - start
 	if took > (measure.slowest[callName] or 0) then
 		measure.slowest[callName] = took
-		if subject then
-			measure.slowSubject[callName] = subject
-		end
 	end
 	return a, b, c, d, e, f, g
 end
 
 local function StartMeasuring()
 	local now = GetTimePreciseSec()
-	measure = { start = now, lastFrame = now, total = NewCounts(), frame = NewCounts(), slowest = {}, slowSubject = {}, worstGap = 0 }
+	measure = {
+		start = now, lastFrame = now, total = NewCounts(), frame = NewCounts(), slowest = {}, worstGap = 0,
+		checked = 0, agree = 0, suffixed = 0, suffixAdds = 0, skipped = 0, bySuffix = {},
+	}
 	monitor:Show()
 end
 
@@ -183,6 +185,74 @@ monitor:SetScript("OnUpdate", function()
 	measure.frame = NewCounts()
 end)
 
+local function SameSet(a, b)
+	for key in pairs(a) do
+		if not b[key] then
+			return false
+		end
+	end
+	for key in pairs(b) do
+		if not a[key] then
+			return false
+		end
+	end
+	return true
+end
+
+local function SetText(set)
+	local keys = {}
+	for key in pairs(set) do
+		keys[#keys + 1] = key:sub(1, 3):lower()
+	end
+	table.sort(keys)
+	return #keys > 0 and table.concat(keys, "+") or "none"
+end
+
+-- The stat amounts of an item key's tooltip, with the given random suffix (0 for none).
+local function TooltipAmounts(itemKey, suffix)
+	local tooltip = Measured("tooltip", C_TooltipInfo.GetItemKey, itemKey.itemID, itemKey.itemLevel, suffix, C_AuctionHouse.GetItemKeyRequiredLevel(itemKey))
+	return tooltip and tooltip.lines and ns.StatAmounts(tooltip.lines, linePatterns)
+end
+
+-- After an entry's stats were read from the game's stat table: does the item's tooltip without
+-- its suffix agree, and does its suffix add stats in the tooltip?
+local function Diagnose(entry)
+	if not measure then
+		return
+	end
+	local itemKey = entry.result.itemKey
+	local suffix = itemKey.itemSuffix
+	if suffix == STALLING_SUFFIX then
+		measure.skipped = measure.skipped + 1
+		return
+	end
+	local base = TooltipAmounts(itemKey, 0)
+	if not base then
+		return
+	end
+	measure.checked = measure.checked + 1
+	local fromTooltip = ns.Raised(base)
+	if SameSet(fromTooltip, entry.stats) then
+		measure.agree = measure.agree + 1
+	else
+		measure.example = measure.example or string.format("%s: tooltip %s, item stats %s", entry.name or itemKey.itemID, SetText(fromTooltip), SetText(entry.stats))
+	end
+	if suffix ~= 0 then
+		measure.suffixed = measure.suffixed + 1
+		local withSuffix = TooltipAmounts(itemKey, suffix)
+		local added = withSuffix and ns.SuffixStats(withSuffix, base)
+		if added and next(added) then
+			measure.suffixAdds = measure.suffixAdds + 1
+			local seen = measure.bySuffix[suffix]
+			if not seen then
+				seen = { suffix = suffix, count = 0, stats = SetText(added), example = entry.name or tostring(itemKey.itemID) }
+				measure.bySuffix[suffix] = seen
+			end
+			seen.count = seen.count + 1
+		end
+	end
+end
+
 local function CountsText(counts)
 	local parts = {}
 	for _, name in ipairs(COUNT_NAMES) do
@@ -200,9 +270,6 @@ local function ReportMeasure(how)
 	local m = measure
 	measure = nil
 	monitor:Hide()
-	if m.worstGap < STALL then
-		return
-	end
 	local worst = m.worst or NewCounts()
 	local calls = {}
 	for _, callName in ipairs(CALL_ORDER) do
@@ -210,11 +277,25 @@ local function ReportMeasure(how)
 			calls[#calls + 1] = string.format("%s %.0f", CALL_NAMES[callName], m.slowest[callName] * 1000)
 		end
 	end
-	local slowItem = m.slowSubject.tooltip
+	local suffixes = {}
+	for _, seen in pairs(m.bySuffix) do
+		suffixes[#suffixes + 1] = seen
+	end
+	table.sort(suffixes, function(a, b)
+		return a.count > b.count
+	end)
+	local top = {}
+	for index = 1, math.min(4, #suffixes) do
+		local seen = suffixes[index]
+		top[index] = string.format("%d on %d items, %s, e.g. %s", seen.suffix, seen.count, seen.stats, seen.example)
+	end
 	Say(string.format("test %s: search %s in %.1f s. In all: %s.", VERSION, how, GetTimePreciseSec() - m.start, CountsText(m.total)))
-	Say(string.format("Longest frame %.2f s, of it the addon %.3f s (%s). Slowest calls, ms: %s. Slowest tooltip: %s.",
-		m.worstGap, worst.addon, CountsText(worst), #calls > 0 and table.concat(calls, ", ") or "none",
-		slowItem and string.format("item %d suffix %d", slowItem.itemID, slowItem.itemSuffix) or "none"))
+	Say(string.format("Longest frame %.2f s, of it the addon %.3f s (%s). Slowest calls, ms: %s.",
+		m.worstGap, worst.addon, CountsText(worst), #calls > 0 and table.concat(calls, ", ") or "none"))
+	Say(string.format("Check: item stats vs tooltip %d of %d agree%s. Suffix adds stats on %d of %d suffixed items, %d suffixes%s. Suffix %d not checked, on %d items.",
+		m.agree, m.checked, m.example and (" (first other: " .. m.example .. ")") or "",
+		m.suffixAdds, m.suffixed, #suffixes, #top > 0 and (": " .. table.concat(top, "; ")) or "",
+		STALLING_SUFFIX, m.skipped))
 end
 
 --------------------------------------------------------------------------------
@@ -297,29 +378,29 @@ local function IsMatch(entry)
 	return entry.stats ~= nil and ns.HasAll(entry.stats, search.stats)
 end
 
--- Reads the stats an entry's item raises from the tooltip the auction house shows for it
--- (the same SetItemKey arguments Blizzard uses for a results row, random suffix included).
--- An item whose data isn't on the client yet waits for it.
--- The tooltip is read only once the auction house has the item key's info, which also gives
--- the name the list shows and sorts by. In 0.1.0 to 0.1.3 one listing (item 11968 with suffix
--- 14328) froze the game for 14 s inside the tooltip call, in every session; the auction house
--- never had its info, not even minutes later. C_TooltipInfo.GetItemKey takes no shortcut
--- (C_Item.GetItemStats with a link built from the item key ignores the suffix: 0 of 4877
--- suffixed items changed). A listing whose info never arrives stays out of the results.
+-- Reads the stats an entry's item raises from the game's stat table for the item
+-- (C_Item.GetItemStats). An item whose data isn't on the client yet waits for it, and the
+-- auction house's info on the item key gives the name the list shows and sorts by; a listing it
+-- can't name stays out of the results.
+-- No tooltip is built. In 0.1.0 to 0.1.4 the first tooltip in a session with random suffix 14328
+-- (items 11968 and 6560) stalled the game for 14.2 s inside C_TooltipInfo.GetItemKey, while
+-- GetItemStats never took a millisecond, for those items too. GetItemStats knows the item
+-- itself, not what a random suffix ("of the Bear") adds: with the suffix in a link it ignored it
+-- for all 4877 suffixed items, and it agreed with the tooltip on 5968 of 6030 items.
 local function ReadStats(entry)
 	local itemKey = entry.result.itemKey
 	local itemID = itemKey.itemID
-	local classID = select(6, Measured("instant", nil, C_Item.GetItemInfoInstant, itemID))
+	local classID = select(6, Measured("instant", C_Item.GetItemInfoInstant, itemID))
 	if classID and not GEAR_CLASSES[classID] then
 		entry.stats = NO_STATS
 		statsCache[entry.key] = NO_STATS
 		return
 	end
-	if not Measured("cached", nil, C_Item.IsItemDataCachedByID, itemID) then
+	if not Measured("cached", C_Item.IsItemDataCachedByID, itemID) then
 		WaitForItem(itemID, entry)
 		return
 	end
-	local info = Measured("keyInfo", nil, C_AuctionHouse.GetItemKeyInfo, itemKey)
+	local info = Measured("keyInfo", C_AuctionHouse.GetItemKeyInfo, itemKey)
 	if not (info and info.itemName) then
 		WaitForKeyInfo(itemID, entry)
 		return
@@ -327,14 +408,9 @@ local function ReadStats(entry)
 	entry.name = info.itemName
 	nameCache[entry.key] = info.itemName
 	Count("reads")
-	local tooltip = Measured("tooltip", itemKey, C_TooltipInfo.GetItemKey, itemID, itemKey.itemLevel, itemKey.itemSuffix, C_AuctionHouse.GetItemKeyRequiredLevel(itemKey))
-	if tooltip and tooltip.lines then
-		entry.stats = ns.RaisedStats(tooltip.lines, linePatterns)
-		statsCache[entry.key] = entry.stats
-	else
-		-- Left out of this search, but not remembered: the next search reads it again.
-		entry.stats = NO_STATS
-	end
+	entry.stats = ns.RaisedByItemStats(Measured("itemStats", C_Item.GetItemStats, "item:" .. itemID))
+	statsCache[entry.key] = entry.stats
+	Diagnose(entry)
 end
 
 -- Takes in a page of results. A result already there (the same search re-sorted) takes the
@@ -371,7 +447,7 @@ local function Redraw()
 	end
 	search.shown = shown
 	resultsFrame.browseResults = shown
-	Measured("refresh", nil, resultsFrame.ItemList.RefreshScrollFrame, resultsFrame.ItemList)
+	Measured("refresh", resultsFrame.ItemList.RefreshScrollFrame, resultsFrame.ItemList)
 	UpdateEmptyList()
 end
 
@@ -414,7 +490,7 @@ local function IssueLoads()
 			loadsInFlight = loadsInFlight + 1
 			events:RegisterEvent("ITEM_DATA_LOAD_RESULT")
 			Count("asks")
-			Measured("ask", nil, C_Item.RequestLoadItemDataByID, itemID)
+			Measured("ask", C_Item.RequestLoadItemDataByID, itemID)
 		end
 	end
 end
