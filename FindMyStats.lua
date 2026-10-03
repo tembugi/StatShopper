@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- chat lines use this, which /reload picks up.
-local VERSION = "0.1.3"
+local VERSION = "0.1.4"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
@@ -91,11 +91,11 @@ local function IsEmpty(queue)
 	return queue.head > queue.tail
 end
 
-local workQueue = NewQueue() -- entries still needing their stats read, or a match its name
+local readQueue = NewQueue() -- entries whose stats aren't read yet
 local itemWaits = {} -- itemID -> { entries = waiting for the item's data, loading = asked for }
 local loadQueue = NewQueue() -- itemIDs to ask the server about
 local loadsInFlight = 0
-local unnamedItems = {} -- itemID -> matches whose name the auction house hasn't sent yet
+local keyWaits = {} -- itemID -> entries waiting for the auction house's info on their item key
 local redrawPending, lastRedraw = false, 0
 local spinnerShown -- the addon shows Blizzard's spinner in place of "No results"
 
@@ -107,22 +107,23 @@ local stopped -- true after an error: the filters stay off until /reload
 local Guarded -- runs addon code inside Blizzard's without breaking it (defined below)
 
 --------------------------------------------------------------------------------
--- Test build only (0.1.2, 0.1.3): measures where a filtered search's time goes and says it in chat
--- when the search is done. The first search after a client restart stalled the game in 0.1.0
--- and 0.1.1. Remove this section and the Measured/Count calls once the cause is known.
+-- Test build only (0.1.2 to 0.1.4): times a filtered search's frames. In 0.1.4 it speaks only
+-- when a frame took STALL seconds or more: the game stalled for 14 s in 0.1.0 to 0.1.3, inside
+-- the tooltip call for one listing (see ReadStats). Remove this section and the
+-- Measured/Count calls once the in-game test shows no stall.
 --------------------------------------------------------------------------------
 
+local STALL = 1
 local CALL_NAMES = {
 	instant = "item class",
 	cached = "cache check",
-	itemStats = "item stats",
+	keyInfo = "key info",
 	tooltip = "tooltip",
-	name = "name",
 	ask = "item ask",
 	refresh = "list refresh",
 }
-local CALL_ORDER = { "tooltip", "itemStats", "name", "cached", "instant", "ask", "refresh" }
-local COUNT_NAMES = { "pages", "results", "reads", "asks", "arrived", "names", "redraws" }
+local CALL_ORDER = { "tooltip", "keyInfo", "cached", "instant", "ask", "refresh" }
+local COUNT_NAMES = { "pages", "results", "reads", "asks", "arrived", "waits", "redraws" }
 
 local measure -- nil, or the search being measured
 local monitor = CreateFrame("Frame") -- times every frame while a search is measured
@@ -144,8 +145,8 @@ local function Count(name, amount)
 	end
 end
 
--- Calls func and remembers the slowest such call of the search.
-local function Measured(callName, func, ...)
+-- Calls func and remembers the slowest such call of the search, and for the tooltip, its item.
+local function Measured(callName, subject, func, ...)
 	if not measure then
 		return func(...)
 	end
@@ -154,98 +155,17 @@ local function Measured(callName, func, ...)
 	local took = GetTimePreciseSec() - start
 	if took > (measure.slowest[callName] or 0) then
 		measure.slowest[callName] = took
+		if subject then
+			measure.slowSubject[callName] = subject
+		end
 	end
 	return a, b, c, d, e, f, g
 end
 
 local function StartMeasuring()
 	local now = GetTimePreciseSec()
-	measure = {
-		start = now, lastFrame = now, total = NewCounts(), frame = NewCounts(), slowest = {}, worstGap = 0,
-		-- Test build 0.1.3: C_Item.GetItemStats against the tooltip, for every item read.
-		checked = 0, agree = 0, differ = 0, suffixItems = 0, suffixChanged = 0,
-	}
+	measure = { start = now, lastFrame = now, total = NewCounts(), frame = NewCounts(), slowest = {}, slowSubject = {}, worstGap = 0 }
 	monitor:Show()
-end
-
--- An item link built from an item key: the random suffix in the link's seventh field. Whether
--- the auction house's itemSuffix is that field's ID is what the test checks.
-local function KeyLink(itemKey, suffix)
-	return "item:" .. itemKey.itemID .. "::::::" .. suffix
-end
-
--- The attributes C_Item.GetItemStats reports for a link, by stat key, as a set.
-local function RaisedByItemStats(link)
-	local stats = Measured("itemStats", C_Item.GetItemStats, link)
-	local raised = {}
-	if type(stats) == "table" then
-		for _, group in ipairs(ns.STAT_GROUPS) do
-			for _, stat in ipairs(group.stats) do
-				local amount = stats[stat.label]
-				if type(amount) == "number" and amount > 0 then
-					raised[stat.key] = true
-				end
-			end
-		end
-	end
-	return raised
-end
-
-local function SameSet(a, b)
-	for key in pairs(a) do
-		if not b[key] then
-			return false
-		end
-	end
-	for key in pairs(b) do
-		if not a[key] then
-			return false
-		end
-	end
-	return true
-end
-
-local function SetText(set)
-	local keys = {}
-	for key in pairs(set) do
-		keys[#keys + 1] = key:sub(1, 3):lower()
-	end
-	table.sort(keys)
-	return #keys > 0 and table.concat(keys, "+") or "none"
-end
-
--- Before the tooltip is read: what GetItemStats says, with the suffix and, for a suffixed item,
--- without it.
-local function CheckItemStatsBefore(itemKey)
-	if not measure then
-		return
-	end
-	local check = { withSuffix = RaisedByItemStats(KeyLink(itemKey, itemKey.itemSuffix)) }
-	if itemKey.itemSuffix ~= 0 then
-		check.withoutSuffix = RaisedByItemStats(KeyLink(itemKey, 0))
-	end
-	return check
-end
-
--- After the tooltip is read: does GetItemStats agree with it?
-local function CheckItemStatsAfter(check, itemKey, fromTooltip)
-	if not (check and measure) then
-		return
-	end
-	measure.checked = measure.checked + 1
-	if SameSet(check.withSuffix, fromTooltip) then
-		measure.agree = measure.agree + 1
-	else
-		measure.differ = measure.differ + 1
-		measure.example = measure.example or string.format("item %d suffix %d: tooltip %s, item stats %s",
-			itemKey.itemID, itemKey.itemSuffix, SetText(fromTooltip), SetText(check.withSuffix))
-	end
-	if check.withoutSuffix then
-		measure.suffixItems = measure.suffixItems + 1
-		if not SameSet(check.withSuffix, check.withoutSuffix) then
-			measure.suffixChanged = measure.suffixChanged + 1
-		end
-	end
 end
 
 monitor:SetScript("OnUpdate", function()
@@ -280,6 +200,9 @@ local function ReportMeasure(how)
 	local m = measure
 	measure = nil
 	monitor:Hide()
+	if m.worstGap < STALL then
+		return
+	end
 	local worst = m.worst or NewCounts()
 	local calls = {}
 	for _, callName in ipairs(CALL_ORDER) do
@@ -287,16 +210,11 @@ local function ReportMeasure(how)
 			calls[#calls + 1] = string.format("%s %.0f", CALL_NAMES[callName], m.slowest[callName] * 1000)
 		end
 	end
+	local slowItem = m.slowSubject.tooltip
 	Say(string.format("test %s: search %s in %.1f s. In all: %s.", VERSION, how, GetTimePreciseSec() - m.start, CountsText(m.total)))
-	Say(string.format("Longest frame %.2f s, of it the addon %.3f s (%s). Slowest calls, ms: %s.",
-		m.worstGap, worst.addon, CountsText(worst), #calls > 0 and table.concat(calls, ", ") or "none"))
-	local slowItem = "none"
-	if m.slowItem then
-		local info = C_AuctionHouse.GetItemKeyInfo(m.slowItem)
-		slowItem = string.format("item %d suffix %d (%s)", m.slowItem.itemID, m.slowItem.itemSuffix, info and info.itemName or "?")
-	end
-	Say(string.format("Item stats vs tooltip: %d checked, %d agree, %d differ%s. Suffix changed item stats for %d of %d suffixed items. Slowest tooltip: %s.",
-		m.checked, m.agree, m.differ, m.example and (" (first: " .. m.example .. ")") or "", m.suffixChanged, m.suffixItems, slowItem))
+	Say(string.format("Longest frame %.2f s, of it the addon %.3f s (%s). Slowest calls, ms: %s. Slowest tooltip: %s.",
+		m.worstGap, worst.addon, CountsText(worst), #calls > 0 and table.concat(calls, ", ") or "none",
+		slowItem and string.format("item %d suffix %d", slowItem.itemID, slowItem.itemSuffix) or "none"))
 end
 
 --------------------------------------------------------------------------------
@@ -304,7 +222,7 @@ end
 --------------------------------------------------------------------------------
 
 local function IsWorking()
-	return search ~= nil and (not IsEmpty(workQueue) or not IsEmpty(loadQueue) or loadsInFlight > 0 or not search.complete)
+	return search ~= nil and (not IsEmpty(readQueue) or not IsEmpty(loadQueue) or loadsInFlight > 0 or not search.complete)
 end
 
 -- Blizzard's list says "No results" once every page has arrived, and shows its loading
@@ -336,11 +254,11 @@ local function StopSearch()
 		ReportMeasure("stopped before it was done")
 	end
 	search = nil
-	workQueue = NewQueue()
+	readQueue = NewQueue()
 	itemWaits = {}
 	loadQueue = NewQueue()
 	loadsInFlight = 0
-	wipe(unnamedItems)
+	keyWaits = {}
 	redrawPending = false
 	events:UnregisterAllEvents()
 	worker:Hide()
@@ -353,7 +271,7 @@ local function StartSearch(stats)
 end
 
 local function Enqueue(entry)
-	Push(workQueue, entry)
+	Push(readQueue, entry)
 	worker:Show()
 end
 
@@ -367,6 +285,14 @@ local function WaitForItem(itemID, entry)
 	wait.entries[#wait.entries + 1] = entry
 end
 
+local function WaitForKeyInfo(itemID, entry)
+	Count("waits")
+	local waiting = keyWaits[itemID] or {}
+	waiting[#waiting + 1] = entry
+	keyWaits[itemID] = waiting
+	events:RegisterEvent("ITEM_KEY_ITEM_INFO_RECEIVED")
+end
+
 local function IsMatch(entry)
 	return entry.stats ~= nil and ns.HasAll(entry.stats, search.stats)
 end
@@ -374,52 +300,40 @@ end
 -- Reads the stats an entry's item raises from the tooltip the auction house shows for it
 -- (the same SetItemKey arguments Blizzard uses for a results row, random suffix included).
 -- An item whose data isn't on the client yet waits for it.
+-- The tooltip is read only once the auction house has the item key's info, which also gives
+-- the name the list shows and sorts by. In 0.1.0 to 0.1.3 one listing (item 11968 with suffix
+-- 14328) froze the game for 14 s inside the tooltip call, in every session; the auction house
+-- never had its info, not even minutes later. C_TooltipInfo.GetItemKey takes no shortcut
+-- (C_Item.GetItemStats with a link built from the item key ignores the suffix: 0 of 4877
+-- suffixed items changed). A listing whose info never arrives stays out of the results.
 local function ReadStats(entry)
 	local itemKey = entry.result.itemKey
 	local itemID = itemKey.itemID
-	local classID = select(6, Measured("instant", C_Item.GetItemInfoInstant, itemID))
+	local classID = select(6, Measured("instant", nil, C_Item.GetItemInfoInstant, itemID))
 	if classID and not GEAR_CLASSES[classID] then
 		entry.stats = NO_STATS
 		statsCache[entry.key] = NO_STATS
 		return
 	end
-	if not Measured("cached", C_Item.IsItemDataCachedByID, itemID) then
+	if not Measured("cached", nil, C_Item.IsItemDataCachedByID, itemID) then
 		WaitForItem(itemID, entry)
 		return
 	end
-	Count("reads")
-	local check = CheckItemStatsBefore(itemKey)
-	local slowestBefore = measure and measure.slowest.tooltip
-	local tooltip = Measured("tooltip", C_TooltipInfo.GetItemKey, itemID, itemKey.itemLevel, itemKey.itemSuffix, C_AuctionHouse.GetItemKeyRequiredLevel(itemKey))
-	if measure and measure.slowest.tooltip ~= slowestBefore then
-		measure.slowItem = itemKey
+	local info = Measured("keyInfo", nil, C_AuctionHouse.GetItemKeyInfo, itemKey)
+	if not (info and info.itemName) then
+		WaitForKeyInfo(itemID, entry)
+		return
 	end
+	entry.name = info.itemName
+	nameCache[entry.key] = info.itemName
+	Count("reads")
+	local tooltip = Measured("tooltip", itemKey, C_TooltipInfo.GetItemKey, itemID, itemKey.itemLevel, itemKey.itemSuffix, C_AuctionHouse.GetItemKeyRequiredLevel(itemKey))
 	if tooltip and tooltip.lines then
 		entry.stats = ns.RaisedStats(tooltip.lines, linePatterns)
 		statsCache[entry.key] = entry.stats
-		CheckItemStatsAfter(check, itemKey, entry.stats)
 	else
 		-- Left out of this search, but not remembered: the next search reads it again.
 		entry.stats = NO_STATS
-	end
-end
-
--- The item's name as the list shows it, for sorting by name. Nil until the auction house has
--- the item key's info; ITEM_KEY_ITEM_INFO_RECEIVED says when it arrives.
-local function ReadName(entry)
-	Count("names")
-	local info = Measured("name", C_AuctionHouse.GetItemKeyInfo, entry.result.itemKey)
-	entry.name = info and info.itemName
-	nameCache[entry.key] = entry.name
-end
-
--- One entry's work: its stats, then, for a match, its name.
-local function Process(entry)
-	if not entry.stats then
-		ReadStats(entry)
-	end
-	if not entry.name and IsMatch(entry) then
-		ReadName(entry)
 	end
 end
 
@@ -437,7 +351,7 @@ local function Merge(results)
 			entry = { key = key, result = result, order = #search.entries + 1, stats = statsCache[key], name = nameCache[key] }
 			search.byKey[key] = entry
 			search.entries[#search.entries + 1] = entry
-			if not entry.stats or (not entry.name and IsMatch(entry)) then
+			if not entry.stats then
 				Enqueue(entry)
 			end
 		end
@@ -445,26 +359,11 @@ local function Merge(results)
 end
 
 -- Hands the results frame the matches, sorted as its headers say, and redraws its list.
--- Matches whose name hasn't arrived sort last until ITEM_KEY_ITEM_INFO_RECEIVED brings it.
 local function Redraw()
 	Count("redraws")
 	redrawPending = false
 	lastRedraw = GetTime()
 	local matching = ns.Matching(search.entries, search.stats)
-	wipe(unnamedItems)
-	for _, entry in ipairs(matching) do
-		if not entry.name then
-			local itemID = entry.result.itemKey.itemID
-			local waiting = unnamedItems[itemID] or {}
-			waiting[#waiting + 1] = entry
-			unnamedItems[itemID] = waiting
-		end
-	end
-	if next(unnamedItems) then
-		events:RegisterEvent("ITEM_KEY_ITEM_INFO_RECEIVED")
-	else
-		events:UnregisterEvent("ITEM_KEY_ITEM_INFO_RECEIVED")
-	end
 	ns.SortEntries(matching, auctionFrame:GetSortsForContext(auctionFrame:GetBrowseSearchContext()), SORT_VALUES)
 	local shown = {}
 	for index, entry in ipairs(matching) do
@@ -472,7 +371,7 @@ local function Redraw()
 	end
 	search.shown = shown
 	resultsFrame.browseResults = shown
-	Measured("refresh", resultsFrame.ItemList.RefreshScrollFrame, resultsFrame.ItemList)
+	Measured("refresh", nil, resultsFrame.ItemList.RefreshScrollFrame, resultsFrame.ItemList)
 	UpdateEmptyList()
 end
 
@@ -515,13 +414,13 @@ local function IssueLoads()
 			loadsInFlight = loadsInFlight + 1
 			events:RegisterEvent("ITEM_DATA_LOAD_RESULT")
 			Count("asks")
-			Measured("ask", C_Item.RequestLoadItemDataByID, itemID)
+			Measured("ask", nil, C_Item.RequestLoadItemDataByID, itemID)
 		end
 	end
 end
 
--- One frame's work: ask about more items, work on entries until the frame's budget is spent,
--- and redraw when matches came in (at most every REDRAW_INTERVAL while more are coming).
+-- One frame's work: ask about more items, read items until the frame's budget is spent, and
+-- redraw when matches came in (at most every REDRAW_INTERVAL while more are coming).
 local function Work()
 	if not search then
 		worker:Hide()
@@ -529,9 +428,11 @@ local function Work()
 	end
 	IssueLoads()
 	local deadline = GetTimePreciseSec() + FRAME_BUDGET
-	while not IsEmpty(workQueue) and GetTimePreciseSec() < deadline do
-		local entry = Take(workQueue)
-		Process(entry)
+	while not IsEmpty(readQueue) and GetTimePreciseSec() < deadline do
+		local entry = Take(readQueue)
+		if not entry.stats then
+			ReadStats(entry)
+		end
 		if IsMatch(entry) then
 			redrawPending = true
 		end
@@ -545,7 +446,7 @@ local function Work()
 		end
 	end
 	-- Asleep until an event brings more to do: item data, a page, or item key info.
-	if IsEmpty(workQueue) and (IsEmpty(loadQueue) or loadsInFlight >= MAX_ITEM_LOADS) and not redrawPending then
+	if IsEmpty(readQueue) and (IsEmpty(loadQueue) or loadsInFlight >= MAX_ITEM_LOADS) and not redrawPending then
 		worker:Hide()
 	end
 	UpdateEmptyList()
@@ -579,15 +480,18 @@ local function OnItemData(itemID, success)
 	worker:Show()
 end
 
--- The auction house sends item key info for every row it shows; only matches still without a
--- name need it, and get their name read again.
+-- The auction house has the info on an item's keys: their entries are read again.
 local function OnItemKeyInfo(itemID)
-	local waiting = unnamedItems[itemID]
-	if waiting and OwnsList() then
-		unnamedItems[itemID] = nil
-		for _, entry in ipairs(waiting) do
-			Enqueue(entry)
-		end
+	local waiting = keyWaits[itemID]
+	if not waiting then
+		return
+	end
+	keyWaits[itemID] = nil
+	if not next(keyWaits) then
+		events:UnregisterEvent("ITEM_KEY_ITEM_INFO_RECEIVED")
+	end
+	for _, entry in ipairs(waiting) do
+		Enqueue(entry)
 	end
 end
 
