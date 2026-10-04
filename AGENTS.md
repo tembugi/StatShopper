@@ -8,15 +8,20 @@ The name is "Find My Stats" (the user's choice; `ADDON_TITLE` in the code, also 
 
 ## Look
 
-- A "Stats" title (`PET_BATTLE_STATS_LABEL`) at the end of Blizzard's Filter dropdown, after the spacer Blizzard queues behind its last group, then one submenu per stat group with the game's checkboxes. Added with `Menu.ModifyMenu("MENU_AUCTION_HOUSE_SEARCH_FILTER")`. Every label is a game string (`STAT_CATEGORY_*`, `ITEM_MOD_*_SHORT`).
-- The Attributes group only so far (Strength, Agility, Stamina, Intellect, Spirit). The plan is all the stats Forever's gear has, in groups as on the canvas: Melee, Ranged, Spell, Defense, Resistances, Weapon Skills. A real auction's stat table already includes "Equip:" effects (healing, spell damage on "of the Physician"); before adding a group, check in game that the stat table reports its stats the way auctions show them.
+- A "Stats" title (`PET_BATTLE_STATS_LABEL`) at the end of Blizzard's Filter dropdown, after the spacer Blizzard queues behind its last group, then one submenu per stat group with the game's checkboxes. Added with `Menu.ModifyMenu("MENU_AUCTION_HOUSE_SEARCH_FILTER")`. Every label is a game string (`STAT_CATEGORY_*`, `TRADE_SKILLS`, `ITEM_MOD_*_SHORT`, `RESISTANCEn_NAME`).
+- Six groups, as on the canvas (agreed with the user, 2026-10-04): Attributes, Attack, Spell, Defense, Resistances, Professions (`TRADE_SKILLS`, the game's word), with lines (`CreateDivider`) between sections of Attack and Spell. The list is `ns.STAT_GROUPS` in `Stats.lua`, one line per stat, the same for every player (a list that learns from each player's searches was rejected: every player must see the same menu). The user will play and ask for new stats as they turn up; adding one is one line.
+- Which stats (the user's rule): every stat seen on real Forever gear (the auction house, and a scan of every item the game had loaded: 52 stat names, 2026-10-04), every stat on Forever's character sheet (`Camelot/PaperDollFrameConstants.lua`: adds Armor Piercing), all 12 professions (Forever has vanilla's 9 + Cooking, First Aid, Fishing), and all 8 enemy types for Attack Power Vs and Spell Damage Vs (names only Forever's game text has, so Blizzard made them for Forever). Out: Armor and damage per second (on almost every item), Health, Mana and movement speed (sheet totals, no item stat seen), modern WoW stats (Versatility, Mastery...), split melee/ranged/spell Hit and Crit (Forever has one each), weapon skills, Jewelcrafting.
+- Hit, Critical Strike and Haste count for melee and spells alike in Forever, so they are in Attack and in Spell: one key, ticked in both. "Attack" (not "Melee") because the group holds ranged stats too.
+- No Spell Power entry: Spell Power gear ("Increases damage and healing done by magical spells and effects", Staff of Jordan, checked in game) counts for Spell Damage and for Spell Healing; ticking both finds only gear that raises both. Healer gear also carries a little spell damage ("of the Physician": healing 8, damage 3), so it counts for both too.
+- A resistance has two names in the stat table (`RESISTANCE2_NAME` and `ITEM_MOD_FIRE_RESISTANCE_SHORT`, always together); only the first has a game string, so it is the label.
 - The red X on the Filter button shows while any stat is ticked, as it does for Blizzard's own filters, and clicking it unticks them too.
 - Nothing else on screen and no chat lines in normal use.
 - Look changes are mocked on the design canvas first and built after the user picks.
 
 ## Filtering (agreed with the user)
 
-- An item must raise every ticked stat ("all of them"): a positive amount for the stat in the game's stat table. No minimum amounts.
+- An item must raise every ticked stat ("all of them"): a positive amount under any of the stat's names in the game's stat table (`Stat(key, label, other names...)`). No minimum amounts.
+- Open (2026-10-04): once, a search sent while the previous one was still loading showed nothing; searching again worked. Not reproduced in game since (the messages were queued, none dropped), nor in the stand-in (a second search at 80 moments of the first, one or more pages, loaded or unloaded items: 640 replays). If it comes back, catch it with the event listener (`AUCTION_HOUSE_BROWSE_RESULTS_UPDATED`/`_ADDED`, `THROTTLED_MESSAGE_DROPPED`) and a screenshot.
 - Ticks apply when a search is sent, like Blizzard's own filters: a search keeps the stats it was sent with (also when it is re-sorted), and changing ticks changes nothing until the next search.
 - Favorites (the star button, and the list the auction house opens with) are never filtered, as Blizzard's filters don't apply to them.
 - Ticks are saved per character, like the auction house's own filters (`SavedVariablesPerCharacter: FindMyStatsDB`). Learned endings are saved for the account (`SavedVariables: FindMyStatsAccountDB`).
@@ -46,7 +51,7 @@ The name is "Find My Stats" (the user's choice; `ADDON_TITLE` in the code, also 
 
 ## Tests
 
-`luajit Tests/run.lua` checks the rules in `Stats.lua`: the stat list, reading stats from the game's stat table with and without an ending, what an ending adds (with the in-game numbers for Watcher's Cap of the Whale and of the Physician), the all-of rule, telling results apart, sorting like the browse list, the ticks a search keeps, `NormalizeSaved` and `NormalizeAccount`. `FindMyStats.lua` plugs into Blizzard's code and is tested in game; before a round it also runs in a luajit stand-in with a simulated server (pages, throttle, slow item data, a row's auctions with real links), copying Blizzard's list code from `wow-ui-source`.
+`luajit Tests/run.lua` checks the rules in `Stats.lua`: the stat list (labels, dividers, a stat in two groups the same in both), Spell Power counting for Spell Damage and Spell Healing (Staff of Jordan), a resistance under either name, reading stats from the game's stat table with and without an ending, what an ending adds (with the in-game numbers for Watcher's Cap of the Whale and of the Physician), the all-of rule, telling results apart, sorting like the browse list, the ticks a search keeps, `NormalizeSaved` and `NormalizeAccount`. `FindMyStats.lua` plugs into Blizzard's code and is tested in game; before a round it also runs in a luajit stand-in with a simulated server (pages, throttle, slow item data, a row's auctions with real links), copying Blizzard's list code from `wow-ui-source`.
 
 ## Never
 

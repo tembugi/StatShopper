@@ -2,41 +2,153 @@
 -- table, matching, sorting and the saved ticks. Tests/run.lua loads this file on its own.
 local _, ns = ...
 
--- The stat filters in the Filter menu, one submenu per group. `key` is the stat's saved name
--- (never change one: it is in players' saved data). `label` is the game's global string for the
--- stat: its menu entry, and the key of its amount in the game's stat table (C_Item.GetItemStats).
+-- One stat in the menu. `key` is its saved name (never change one: it is in players' saved data).
+-- `label` is the game's global string for it: the menu entry, and a name its amount has in the
+-- game's stat table (C_Item.GetItemStats). Any further names also count: an item raises the stat
+-- when it has a positive amount under any of them.
+local function Stat(key, label, ...)
+	return { key = key, label = label, names = { label, ... } }
+end
+
+-- A line between sections of a submenu.
+local DIVIDER = { divider = true }
+
+-- The stat filters in the Filter menu, one submenu per group, named by the game's global string.
+-- Which stats are here (agreed with the user, 2026-10-04): every one seen on real Forever gear
+-- (the auction house, and a scan of every item the game had loaded), every one on Forever's
+-- character sheet, all 12 professions, and every enemy type for the "Vs" stats, which Forever
+-- added to the game's text itself. Armor and damage per second, on almost every item, are left
+-- out. A stat found later is one more line. Hit, Critical Strike and Haste count for melee and
+-- spells alike in Forever, so they are in Attack and in Spell: one key, ticked in both. Spell
+-- Power gear ("Increases damage and healing done by magical spells and effects", Staff of
+-- Jordan) counts for Spell Damage and for Spell Healing, with no entry of its own. A resistance
+-- has two names in the stat table, and only RESISTANCEn_NAME has a game string.
 ns.STAT_GROUPS = {
 	{
 		name = "STAT_CATEGORY_ATTRIBUTES",
 		stats = {
-			{ key = "STRENGTH", label = "ITEM_MOD_STRENGTH_SHORT" },
-			{ key = "AGILITY", label = "ITEM_MOD_AGILITY_SHORT" },
-			{ key = "STAMINA", label = "ITEM_MOD_STAMINA_SHORT" },
-			{ key = "INTELLECT", label = "ITEM_MOD_INTELLECT_SHORT" },
-			{ key = "SPIRIT", label = "ITEM_MOD_SPIRIT_SHORT" },
+			Stat("STRENGTH", "ITEM_MOD_STRENGTH_SHORT"),
+			Stat("AGILITY", "ITEM_MOD_AGILITY_SHORT"),
+			Stat("STAMINA", "ITEM_MOD_STAMINA_SHORT"),
+			Stat("INTELLECT", "ITEM_MOD_INTELLECT_SHORT"),
+			Stat("SPIRIT", "ITEM_MOD_SPIRIT_SHORT"),
+		},
+	},
+	{
+		name = "STAT_CATEGORY_ATTACK",
+		stats = {
+			Stat("ATTACK_POWER", "ITEM_MOD_ATTACK_POWER_SHORT"),
+			Stat("MELEE_ATTACK_POWER", "ITEM_MOD_MELEE_ATTACK_POWER_SHORT"),
+			Stat("RANGED_ATTACK_POWER", "ITEM_MOD_RANGED_ATTACK_POWER_SHORT"),
+			Stat("HIT", "ITEM_MOD_HIT_RATING_SHORT"),
+			Stat("CRIT", "ITEM_MOD_CRIT_RATING_SHORT"),
+			Stat("HASTE", "ITEM_MOD_HASTE_RATING_SHORT"),
+			Stat("EXPERTISE", "ITEM_MOD_EXPERTISE_RATING_SHORT"),
+			Stat("ARMOR_PIERCING", "ITEM_MOD_ARMOR_PENETRATION_RATING_SHORT"),
+			Stat("PHYSICAL_DAMAGE", "ITEM_MOD_PHYSICAL_DAMAGE_DONE_SHORT"),
+			DIVIDER,
+			Stat("ATTACK_POWER_VS_BEAST", "ITEM_MOD_ATTACK_POWER_VS_BEAST_SHORT"),
+			Stat("ATTACK_POWER_VS_DEMON", "ITEM_MOD_ATTACK_POWER_VS_DEMON_SHORT"),
+			Stat("ATTACK_POWER_VS_DRAGONKIN", "ITEM_MOD_ATTACK_POWER_VS_DRAGONKIN_SHORT"),
+			Stat("ATTACK_POWER_VS_ELEMENTAL", "ITEM_MOD_ATTACK_POWER_VS_ELEMENTAL_SHORT"),
+			Stat("ATTACK_POWER_VS_GIANT", "ITEM_MOD_ATTACK_POWER_VS_GIANT_SHORT"),
+			Stat("ATTACK_POWER_VS_HUMANOID", "ITEM_MOD_ATTACK_POWER_VS_HUMANOID_SHORT"),
+			Stat("ATTACK_POWER_VS_MECHANICAL", "ITEM_MOD_ATTACK_POWER_VS_MECHANICAL_SHORT"),
+			Stat("ATTACK_POWER_VS_UNDEAD", "ITEM_MOD_ATTACK_POWER_VS_UNDEAD_SHORT"),
+		},
+	},
+	{
+		name = "STAT_CATEGORY_SPELL",
+		stats = {
+			Stat("SPELL_DAMAGE", "ITEM_MOD_SPELL_DAMAGE_DONE_SHORT", "ITEM_MOD_SPELL_POWER_SHORT"),
+			Stat("SPELL_HEALING", "ITEM_MOD_SPELL_HEALING_DONE_SHORT", "ITEM_MOD_SPELL_POWER_SHORT"),
+			Stat("HIT", "ITEM_MOD_HIT_RATING_SHORT"),
+			Stat("CRIT", "ITEM_MOD_CRIT_RATING_SHORT"),
+			Stat("HASTE", "ITEM_MOD_HASTE_RATING_SHORT"),
+			Stat("SPELL_PIERCING", "ITEM_MOD_SPELL_PENETRATION_SHORT"),
+			Stat("MANA_REGENERATION", "ITEM_MOD_MANA_REGENERATION_SHORT"),
+			DIVIDER,
+			Stat("ARCANE_DAMAGE", "ITEM_MOD_ARCANE_DAMAGE_DONE_SHORT"),
+			Stat("FIRE_DAMAGE", "ITEM_MOD_FIRE_DAMAGE_DONE_SHORT"),
+			Stat("FROST_DAMAGE", "ITEM_MOD_FROST_DAMAGE_DONE_SHORT"),
+			Stat("HOLY_DAMAGE", "ITEM_MOD_HOLY_DAMAGE_DONE_SHORT"),
+			Stat("NATURE_DAMAGE", "ITEM_MOD_NATURE_DAMAGE_DONE_SHORT"),
+			Stat("SHADOW_DAMAGE", "ITEM_MOD_SHADOW_DAMAGE_DONE_SHORT"),
+			DIVIDER,
+			Stat("SPELL_DAMAGE_VS_BEAST", "ITEM_MOD_SPELL_DAMAGE_VS_BEAST_SHORT"),
+			Stat("SPELL_DAMAGE_VS_DEMON", "ITEM_MOD_SPELL_DAMAGE_VS_DEMON_SHORT"),
+			Stat("SPELL_DAMAGE_VS_DRAGONKIN", "ITEM_MOD_SPELL_DAMAGE_VS_DRAGONKIN_SHORT"),
+			Stat("SPELL_DAMAGE_VS_ELEMENTAL", "ITEM_MOD_SPELL_DAMAGE_VS_ELEMENTAL_SHORT"),
+			Stat("SPELL_DAMAGE_VS_GIANT", "ITEM_MOD_SPELL_DAMAGE_VS_GIANT_SHORT"),
+			Stat("SPELL_DAMAGE_VS_HUMANOID", "ITEM_MOD_SPELL_DAMAGE_VS_HUMANOID_SHORT"),
+			Stat("SPELL_DAMAGE_VS_MECHANICAL", "ITEM_MOD_SPELL_DAMAGE_VS_MECHANICAL_SHORT"),
+			Stat("SPELL_DAMAGE_VS_UNDEAD", "ITEM_MOD_SPELL_DAMAGE_VS_UNDEAD_SHORT"),
+		},
+	},
+	{
+		name = "STAT_CATEGORY_DEFENSE",
+		stats = {
+			Stat("DEFENSE", "ITEM_MOD_DEFENSE_SKILL_RATING_SHORT"),
+			Stat("DODGE", "ITEM_MOD_DODGE_RATING_SHORT"),
+			Stat("PARRY", "ITEM_MOD_PARRY_RATING_SHORT"),
+			Stat("BLOCK", "ITEM_MOD_BLOCK_RATING_SHORT"),
+			Stat("BLOCK_VALUE", "ITEM_MOD_BLOCK_VALUE_SHORT"),
+			Stat("HEALTH_REGENERATION", "ITEM_MOD_HEALTH_REGEN_SHORT"),
+		},
+	},
+	{
+		name = "STAT_CATEGORY_RESISTANCE",
+		stats = {
+			Stat("FIRE_RESISTANCE", "RESISTANCE2_NAME", "ITEM_MOD_FIRE_RESISTANCE_SHORT"),
+			Stat("NATURE_RESISTANCE", "RESISTANCE3_NAME", "ITEM_MOD_NATURE_RESISTANCE_SHORT"),
+			Stat("FROST_RESISTANCE", "RESISTANCE4_NAME", "ITEM_MOD_FROST_RESISTANCE_SHORT"),
+			Stat("SHADOW_RESISTANCE", "RESISTANCE5_NAME", "ITEM_MOD_SHADOW_RESISTANCE_SHORT"),
+			Stat("ARCANE_RESISTANCE", "RESISTANCE6_NAME", "ITEM_MOD_ARCANE_RESISTANCE_SHORT"),
+		},
+	},
+	{
+		name = "TRADE_SKILLS",
+		stats = {
+			Stat("ALCHEMY", "ITEM_MOD_ALCHEMY_SHORT"),
+			Stat("BLACKSMITHING", "ITEM_MOD_BLACKSMITHING_SHORT"),
+			Stat("COOKING", "ITEM_MOD_COOKING_SHORT"),
+			Stat("ENCHANTING", "ITEM_MOD_ENCHANTING_SHORT"),
+			Stat("ENGINEERING", "ITEM_MOD_ENGINEERING_SHORT"),
+			Stat("FIRST_AID", "ITEM_MOD_FIRST_AID_SHORT"),
+			Stat("FISHING", "ITEM_MOD_FISHING_SHORT"),
+			Stat("HERBALISM", "ITEM_MOD_HERBALISM_SHORT"),
+			Stat("LEATHERWORKING", "ITEM_MOD_LEATHERWORKING_SHORT"),
+			Stat("MINING", "ITEM_MOD_MINING_SHORT"),
+			Stat("SKINNING", "ITEM_MOD_SKINNING_SHORT"),
+			Stat("TAILORING", "ITEM_MOD_TAILORING_SHORT"),
 		},
 	},
 }
 
+-- Every stat once (one listed in two groups is the same stat), in menu order.
+ns.STATS = {}
 -- Stat key -> true, for every stat above.
 ns.KNOWN_STATS = {}
 for _, group in ipairs(ns.STAT_GROUPS) do
 	for _, stat in ipairs(group.stats) do
-		ns.KNOWN_STATS[stat.key] = true
+		if not stat.divider and not ns.KNOWN_STATS[stat.key] then
+			ns.KNOWN_STATS[stat.key] = true
+			ns.STATS[#ns.STATS + 1] = stat
+		end
 	end
 end
 
--- The stats an item raises, as a set of stat keys: those with a positive amount in the game's
--- stat table for the item, plus those its random ending adds. The table comes from
--- C_Item.GetItemStats: amounts keyed by the global string names the menu shows
+-- The stats an item raises, as a set of stat keys: those with a positive amount under any of
+-- their names in the game's stat table for the item, plus those its random ending adds. The
+-- table comes from C_Item.GetItemStats: amounts keyed by global string names
 -- (ITEM_MOD_STRENGTH_SHORT and the like). endingAdds is a set of those names (see EndingAdds),
 -- or nil for an item without an ending. No table means no stats of its own.
 function ns.RaisedByItemStats(itemStats, endingAdds)
 	local raised = {}
-	for _, group in ipairs(ns.STAT_GROUPS) do
-		for _, stat in ipairs(group.stats) do
-			local amount = type(itemStats) == "table" and itemStats[stat.label]
-			if (type(amount) == "number" and amount > 0) or (endingAdds and endingAdds[stat.label]) then
+	for _, stat in ipairs(ns.STATS) do
+		for _, name in ipairs(stat.names) do
+			local amount = type(itemStats) == "table" and itemStats[name]
+			if (type(amount) == "number" and amount > 0) or (endingAdds and endingAdds[name]) then
 				raised[stat.key] = true
 			end
 		end

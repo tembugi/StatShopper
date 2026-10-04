@@ -47,12 +47,46 @@ Test("every stat in the menu has a key and the game's name for it", function()
 	local seen = {}
 	for _, group in ipairs(ns.STAT_GROUPS) do
 		Equal(type(group.name), "string", "group name")
-		for _, stat in ipairs(group.stats) do
-			Equal(seen[stat.key], nil, "key used once: " .. tostring(stat.key))
-			seen[stat.key] = true
-			Equal(ns.KNOWN_STATS[stat.key], true, "known stat " .. stat.key)
-			Equal(type(stat.label) == "string" and stat.label:match("^ITEM_MOD_.+_SHORT$") ~= nil, true, stat.key .. " label")
+		local groupKeys = {}
+		for index, stat in ipairs(group.stats) do
+			if stat.divider then
+				Equal(index > 1 and index < #group.stats and not group.stats[index - 1].divider, true, group.name .. " divider between stats")
+			else
+				Equal(groupKeys[stat.key], nil, "key once in " .. group.name .. ": " .. tostring(stat.key))
+				groupKeys[stat.key] = true
+				Equal(ns.KNOWN_STATS[stat.key], true, "known stat " .. stat.key)
+				local label = stat.label
+				Equal(type(label) == "string" and (label:match("^ITEM_MOD_.+_SHORT$") or label:match("^RESISTANCE%d_NAME$")) ~= nil, true, stat.key .. " label")
+				Equal(stat.names[1], label, stat.key .. " counts its own name")
+				-- A stat in two groups (Hit, Critical Strike, Haste) is the same stat in both.
+				local first = seen[stat.key]
+				if first then
+					Equal(table.concat(stat.names, ","), table.concat(first.names, ","), stat.key .. " the same in every group")
+				end
+				seen[stat.key] = stat
+			end
 		end
+	end
+	Equal(#ns.STATS, 63, "stats")
+end)
+
+Test("Hit, Critical Strike and Haste are in Attack and in Spell", function()
+	local function Keys(groupName)
+		for _, group in ipairs(ns.STAT_GROUPS) do
+			if group.name == groupName then
+				local keys = {}
+				for _, stat in ipairs(group.stats) do
+					if stat.key then
+						keys[stat.key] = true
+					end
+				end
+				return keys
+			end
+		end
+	end
+	for _, key in ipairs({ "HIT", "CRIT", "HASTE" }) do
+		Equal(Keys("STAT_CATEGORY_ATTACK")[key], true, key .. " in Attack")
+		Equal(Keys("STAT_CATEGORY_SPELL")[key], true, key .. " in Spell")
 	end
 end)
 
@@ -96,6 +130,29 @@ Test("an item raises its own stats and what its ending adds", function()
 	SameSet(ns.RaisedByItemStats({ ITEM_MOD_STRENGTH_SHORT = 4 }, SetOf("ITEM_MOD_STAMINA_SHORT")), SetOf("STRENGTH", "STAMINA"), "own stats and the ending's")
 	SameSet(ns.RaisedByItemStats(nil, SetOf("ITEM_MOD_INTELLECT_SHORT")), SetOf("INTELLECT"), "no table, ending only")
 	SameSet(ns.RaisedByItemStats(CAP, {}), {}, "an ending that adds nothing")
+end)
+
+-- Staff of Jordan (873) in game (2026-10-04): the scan found Intellect, Spirit and Spell Power
+-- in its stat table; its tooltip says +11 Intellect, +11 Spirit and "Increases damage and
+-- healing done by magical spells and effects by up to 60".
+local STAFF_OF_JORDAN = { ITEM_MOD_INTELLECT_SHORT = 11, ITEM_MOD_SPIRIT_SHORT = 11, ITEM_MOD_SPELL_POWER_SHORT = 60 }
+
+Test("Spell Power gear counts for Spell Damage and for Spell Healing", function()
+	SameSet(ns.RaisedByItemStats(STAFF_OF_JORDAN), SetOf("INTELLECT", "SPIRIT", "SPELL_DAMAGE", "SPELL_HEALING"), "Staff of Jordan")
+	SameSet(ns.RaisedByItemStats({ ITEM_MOD_SPELL_HEALING_DONE_SHORT = 20 }), SetOf("SPELL_HEALING"), "healing only")
+	SameSet(ns.RaisedByItemStats({ ITEM_MOD_SPELL_DAMAGE_DONE_SHORT = 7 }), SetOf("SPELL_DAMAGE"), "damage only")
+	SameSet(ns.RaisedByItemStats(CAP, ns.EndingAdds(CAP_OF_THE_PHYSICIAN, CAP)), SetOf("INTELLECT", "STAMINA", "SPELL_DAMAGE", "SPELL_HEALING"), "of the Physician: healing and a little damage")
+	local both = SetOf("SPELL_DAMAGE", "SPELL_HEALING")
+	Equal(ns.HasAll(ns.RaisedByItemStats(STAFF_OF_JORDAN), both), true, "both ticked: Staff of Jordan")
+	Equal(ns.HasAll(ns.RaisedByItemStats({ ITEM_MOD_SPELL_HEALING_DONE_SHORT = 20 }), both), false, "both ticked: healing only")
+end)
+
+Test("a resistance counts under either of its names", function()
+	-- In game both names come together on the same items (the scan, 2026-10-04).
+	SameSet(ns.RaisedByItemStats({ RESISTANCE2_NAME = 10, ITEM_MOD_FIRE_RESISTANCE_SHORT = 10 }), SetOf("FIRE_RESISTANCE"), "both names")
+	SameSet(ns.RaisedByItemStats({ ITEM_MOD_SHADOW_RESISTANCE_SHORT = 5 }), SetOf("SHADOW_RESISTANCE"), "the stat's name")
+	SameSet(ns.RaisedByItemStats({ RESISTANCE6_NAME = 5 }), SetOf("ARCANE_RESISTANCE"), "the resistance's name")
+	SameSet(ns.RaisedByItemStats({ RESISTANCE0_NAME = 300, ITEM_MOD_DAMAGE_PER_SECOND_SHORT = 29.9 }), {}, "armor and damage per second aren't in the menu")
 end)
 
 Test("an item matches only with every wanted stat", function()

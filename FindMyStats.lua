@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- chat line about a changed auction house uses this, which /reload picks up.
-local VERSION = "0.2.0"
+local VERSION = "0.3.0"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
@@ -630,16 +630,20 @@ local function UntickAll()
 end
 
 -- A "Stats" title and a submenu per group at the end of Blizzard's Filter dropdown, after the
--- spacer Blizzard queues behind its last group. A stat whose name the game doesn't have is left
--- out.
+-- spacer Blizzard queues behind its last group, with lines between a group's sections. A stat
+-- whose name the game doesn't have is left out.
 local function AddStatsMenu(root)
 	root:CreateTitle(PET_BATTLE_STATS_LABEL)
 	for _, group in ipairs(ns.STAT_GROUPS) do
 		local submenu = root:CreateButton(_G[group.name])
 		for _, stat in ipairs(group.stats) do
-			local label = _G[stat.label]
-			if type(label) == "string" then
-				submenu:CreateCheckbox(label, IsTicked, OnStatClicked, stat.key)
+			if stat.divider then
+				submenu:CreateDivider()
+			else
+				local label = _G[stat.label]
+				if type(label) == "string" then
+					submenu:CreateCheckbox(label, IsTicked, OnStatClicked, stat.key)
+				end
 			end
 		end
 	end
