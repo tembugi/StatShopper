@@ -1,8 +1,8 @@
 local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
--- chat line about a changed auction house uses this, which /reload picks up.
-local VERSION = "0.3.1"
+-- menu's title and the chat line about a changed auction house use this, which /reload picks up.
+local VERSION = "1.0.0"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
@@ -664,11 +664,27 @@ local function UntickAll()
 	wipe(FindMyStatsDB.stats)
 end
 
--- A "Stats" title and a submenu per group at the end of Blizzard's Filter dropdown, after the
--- spacer Blizzard queues behind its last group, with lines between a group's sections. A stat
--- whose name the game doesn't have is left out.
+-- The addon's version on the title's row, right-aligned in the game's grey for disabled text,
+-- as Blizzard's menu guide adds a second text to a row (11_0_0_MenuImplementationGuide):
+-- attached for as long as the menu is open, with the row's width given, as text anchored on
+-- both sides can't size the row by itself.
+local function AddVersion(frame)
+	local version = frame:AttachFontString()
+	version:SetFont(frame.fontString:GetFont())
+	version:SetHeight(20)
+	version:SetPoint("RIGHT")
+	version:SetJustifyH("RIGHT")
+	version:SetTextColor(DISABLED_FONT_COLOR:GetRGB())
+	version:SetText("v" .. VERSION)
+	local gap = 20
+	return frame.fontString:GetUnboundedStringWidth() + gap + version:GetUnboundedStringWidth(), 20
+end
+
+-- A title with the addon's name and version, and a submenu per group, at the end of Blizzard's
+-- Filter dropdown, after the spacer Blizzard queues behind its last group, with lines between a
+-- group's sections. A stat whose name the game doesn't have is left out.
 local function AddStatsMenu(root)
-	root:CreateTitle(PET_BATTLE_STATS_LABEL)
+	root:CreateTitle(ADDON_TITLE):AddInitializer(AddVersion)
 	for _, group in ipairs(ns.STAT_GROUPS) do
 		local submenu = root:CreateButton(_G[group.name])
 		for _, stat in ipairs(group.stats) do
@@ -707,7 +723,7 @@ local function FindPieces()
 		and list and list.RefreshScrollFrame and list.SetRefreshCallback and list.SetState and list.ResultsText and list.LoadingSpinner
 		and searchBar and searchBar.UpdateClearFiltersButton
 		and filter and filter.Reset and filter.GetFilters and filter.GetLevelRange and filter.ClearFiltersButton
-		and type(PET_BATTLE_STATS_LABEL) == "string" and groupsNamed
+		and DISABLED_FONT_COLOR and groupsNamed
 	then
 		return frame, results, searchBar, filter
 	end

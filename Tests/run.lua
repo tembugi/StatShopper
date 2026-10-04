@@ -345,7 +345,7 @@ local function StandIn(scenario, arguments, queueSize)
 	end
 end
 
-for _, scenario in ipairs({ "one request at a time", "paging waits while viewing an item", "favorites stay unfiltered", "re-sort", "error puts the list back" }) do
+for _, scenario in ipairs({ "menu title", "one request at a time", "paging waits while viewing an item", "favorites stay unfiltered", "re-sort", "error puts the list back" }) do
 	Test("stand-in: " .. scenario, function()
 		StandIn(scenario)
 	end)

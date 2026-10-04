@@ -28,7 +28,7 @@ Enum = {
 }
 NORMAL_FONT_COLOR = { WrapTextInColorCode = function(_, text) return text end }
 RED_FONT_COLOR = NORMAL_FONT_COLOR
-PET_BATTLE_STATS_LABEL = "Stats"
+DISABLED_FONT_COLOR = { GetRGB = function() return 0.5, 0.5, 0.5 end }
 for _, name in ipairs({ "STAT_CATEGORY_ATTRIBUTES", "STAT_CATEGORY_ATTACK", "STAT_CATEGORY_SPELL", "STAT_CATEGORY_DEFENSE", "STAT_CATEGORY_RESISTANCE", "TRADE_SKILLS" }) do
 	_G[name] = name
 end
@@ -639,6 +639,47 @@ scenarios["error puts the list back"] = function()
 		return false, string.format("after the error: %d of %d results on screen, Blizzard's paging %s", #results.browseResults, client.served, tostring(list.refreshCallback))
 	end
 	errors = {}
+	return true
+end
+
+-- The menu's title: the addon's name, and its version right-aligned in grey on the same row.
+scenarios["menu title"] = function()
+	local function FontString(text)
+		local fontString = { text = text, points = {} }
+		function fontString:GetFont() return "Fonts\\FRIZQT__.TTF", 12, "" end
+		function fontString:SetFont(...) self.font = { ... } end
+		function fontString:SetHeight() end
+		function fontString:SetPoint(point) self.points[#self.points + 1] = point end
+		function fontString:SetJustifyH(justify) self.justify = justify end
+		function fontString:SetTextColor(r, g, b) self.color = { r, g, b } end
+		function fontString:SetText(newText) self.text = newText end
+		function fontString:GetUnboundedStringWidth() return #self.text * 6 end
+		return fontString
+	end
+	local title, initializers
+	local root = {}
+	function root:CreateTitle(text)
+		title = text
+		initializers = {}
+		return { AddInitializer = function(_, initializer) initializers[#initializers + 1] = initializer end }
+	end
+	function root:CreateButton()
+		return { CreateCheckbox = function() end, CreateDivider = function() end }
+	end
+	Menu.modify(nil, root)
+	local attached
+	local frame = { fontString = FontString(title) }
+	function frame:AttachFontString() attached = FontString("") return attached end
+	local width, height = initializers[1](frame)
+	if title ~= "Find My Stats" then
+		return false, "title " .. tostring(title)
+	end
+	if not (attached and attached.text:match("^v%d+%.%d+%.%d+$") and attached.justify == "RIGHT" and attached.points[1] == "RIGHT") then
+		return false, "version " .. tostring(attached and attached.text)
+	end
+	if attached.color[1] ~= 0.5 or attached.font[2] ~= 12 or width < (#title + #attached.text) * 6 or height ~= 20 then
+		return false, "version's look or the row's size"
+	end
 	return true
 end
 
