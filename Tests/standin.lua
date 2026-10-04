@@ -646,8 +646,10 @@ end
 scenarios["menu title"] = function()
 	local function FontString(text)
 		local fontString = { text = text, points = {} }
-		function fontString:GetFont() return "Fonts\\FRIZQT__.TTF", 12, "" end
-		function fontString:SetFont(...) self.font = { ... } end
+		-- As Blizzard's menu (Compositor.lua): attached text starts in GameFontHighlight, and
+		-- SetFont on it is an error.
+		fontString.fontObject = "GameFontHighlight"
+		function fontString:SetFont() error("Use of function 'SetFont' is disallowed (Call).") end
 		function fontString:SetHeight() end
 		function fontString:SetPoint(point) self.points[#self.points + 1] = point end
 		function fontString:SetJustifyH(justify) self.justify = justify end
@@ -677,7 +679,7 @@ scenarios["menu title"] = function()
 	if not (attached and attached.text:match("^v%d+%.%d+%.%d+$") and attached.justify == "RIGHT" and attached.points[1] == "RIGHT") then
 		return false, "version " .. tostring(attached and attached.text)
 	end
-	if attached.color[1] ~= 0.5 or attached.font[2] ~= 12 or width < (#title + #attached.text) * 6 or height ~= 20 then
+	if attached.color[1] ~= 0.5 or attached.fontObject ~= frame.fontString.fontObject or width < (#title + #attached.text) * 6 or height ~= 20 then
 		return false, "version's look or the row's size"
 	end
 	return true

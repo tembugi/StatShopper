@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- menu's title and the chat line about a changed auction house use this, which /reload picks up.
-local VERSION = "1.0.1"
+local VERSION = "1.0.2"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
@@ -667,10 +667,11 @@ end
 -- The addon's version on the title's row, right-aligned in the game's grey for disabled text,
 -- as Blizzard's menu guide adds a second text to a row (11_0_0_MenuImplementationGuide):
 -- attached for as long as the menu is open, with the row's width given, as text anchored on
--- both sides can't size the row by itself.
+-- both sides can't size the row by itself. Attached text starts in the title's own font
+-- (GameFontHighlight, Compositor.lua), and the menu forbids SetFont on it (an error in 1.0.0
+-- and 1.0.1, each time the menu opened).
 local function AddVersion(frame)
 	local version = frame:AttachFontString()
-	version:SetFont(frame.fontString:GetFont())
 	version:SetHeight(20)
 	version:SetPoint("RIGHT")
 	version:SetJustifyH("RIGHT")
