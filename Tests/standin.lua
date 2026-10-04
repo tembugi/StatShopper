@@ -172,7 +172,9 @@ local function Answer(message)
 		Log("ANSWER item search")
 		FireEvent("ITEM_SEARCH_RESULTS_UPDATED", message.itemKey)
 		-- Blizzard: "the browse results can be updated when the player retrieves specific item
-		-- and commodity results" (BrowseResultsFrame). ASSUMED: every item search does.
+		-- and commodity results" (BrowseResultsFrame). ASSUMED: every item search does, the worst
+		-- case. In game it doesn't every time: while the addon learned endings, the list never
+		-- jumped to the top (2026-10-04), which every such update would make it do.
 		if client.query then
 			FireEvent("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
 		end
