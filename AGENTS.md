@@ -4,7 +4,7 @@ Rules for this addon. The shared rules are in `../AGENTS.md`.
 
 Stat filters for the auction house: the player ticks stats in the auction house's own Filter menu, and a search shows only gear that raises every ticked stat. Agreed with the user (2026-10-03).
 
-The name is "Stat Shopper" (the user's choice, 2026-10-04; "Find My Stats" until 1.0.2, never on CurseForge; `ADDON_TITLE` in the code, also the start of chat lines). Folder, repo (`tembugi/StatShopper`, public; was `tembugi/FindMyStats`) and packages are `StatShopper`. CurseForge project ID: none yet. Design canvas: https://claude.ai/artifact/U3xXPZ79hi25vV1sm17YH6
+The name is "Stat Shopper" (the user's choice, 2026-10-04; "Find My Stats" until 1.0.2, which CurseForge published as `FindMyStats-v1.0.2.zip`; `ADDON_TITLE` in the code, also the start of chat lines). Folder, repo (`tembugi/StatShopper`, public; was `tembugi/FindMyStats`) and packages are `StatShopper`. CurseForge project ID: 1726374 (https://www.curseforge.com/wow/addons/stat-shopper). Design canvas: https://claude.ai/artifact/U3xXPZ79hi25vV1sm17YH6
 
 ## Look
 
