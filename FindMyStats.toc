@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Find My Stats
 ## Notes: Adds stats to the auction house's Filter menu. A search then shows only gear with every stat you ticked.
-## Version: 0.3.0
+## Version: 0.3.1
 ## Author: tembugi
 ## Category: Auction & Economy
 ## IconAtlas: Auctioneer

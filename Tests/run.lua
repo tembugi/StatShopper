@@ -334,6 +334,33 @@ Test("broken learned endings are dropped", function()
 	Equal(clean.leftover, nil, "leftover field")
 end)
 
+-- The stand-in (Tests/standin.lua): the addon inside a copy of Blizzard's auction house code,
+-- with a simulated server. Each scenario runs in its own luajit, as the addon keeps its state in
+-- its file. QUEUE_SIZE is how many requests the simulated server lets wait (unknown in game).
+local function StandIn(scenario, arguments, queueSize)
+	local command = string.format('QUEUE_SIZE=%d luajit Tests/standin.lua "%s" %s', queueSize or 3, scenario, arguments or "")
+	local result = os.execute(command)
+	if result ~= 0 and result ~= true then
+		error("failed: " .. command, 2)
+	end
+end
+
+for _, scenario in ipairs({ "one request at a time", "paging waits while viewing an item", "favorites stay unfiltered", "re-sort", "error puts the list back" }) do
+	Test("stand-in: " .. scenario, function()
+		StandIn(scenario)
+	end)
+end
+
+Test("stand-in: a second search at any moment of the first", function()
+	for _, queueSize in ipairs({ 1, 3 }) do
+		for _, uncachedEvery in ipairs({ 0, 3 }) do
+			for step = 1, 30 do
+				StandIn("second search", ("%.2f %d"):format(step * 0.1, uncachedEvery), queueSize)
+			end
+		end
+	end
+end)
+
 if failures > 0 then
 	print(failures .. " failed")
 	os.exit(1)

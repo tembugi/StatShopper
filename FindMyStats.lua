@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- chat line about a changed auction house uses this, which /reload picks up.
-local VERSION = "0.3.0"
+local VERSION = "0.3.1"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
@@ -65,6 +65,7 @@ local searchStats -- the stats ticked when the last search was sent; nil when no
 --   entries   every result so far, in arrival order: { key, result, order, stats, name, own }
 --   byKey     ResultKey -> entry
 --   complete  true once every page of results has arrived
+--   pagePaused  true while the next page waits for the results list to be back on screen
 --   shown     the list handed to the results frame
 local search
 
@@ -117,6 +118,11 @@ local Guarded -- runs addon code inside Blizzard's without breaking it (defined 
 -- Filtering the results
 --------------------------------------------------------------------------------
 
+-- True while the results list is on screen: not while the player views an item or another tab.
+local function IsListShowing()
+	return auctionFrame:GetDisplayMode() == AuctionHouseFrameDisplayMode.Buy
+end
+
 local function IsWorking()
 	return search ~= nil and (not IsEmpty(readQueue) or not IsEmpty(loadQueue) or loadsInFlight > 0
 		or asking ~= nil or not IsEmpty(endingQueue) or not search.complete)
@@ -124,22 +130,24 @@ end
 
 -- Blizzard's list says "No results" once every page has arrived, and shows its loading
 -- spinner only before that. While the addon still reads items and nothing matches yet, the
--- list shows Blizzard's spinner instead of "No results".
+-- list shows Blizzard's spinner instead of "No results". Blizzard's list doesn't know: it
+-- remembers what it last showed and skips showing that again (AuctionHouseItemListMixin:SetState).
+-- So when the addon's spinner goes, the list forgets and sets its own look again, instead of the
+-- addon guessing it (a wrong guess would leave the list blank).
 local function UpdateEmptyList()
 	if not resultsFrame then
 		return
 	end
 	local list = resultsFrame.ItemList
-	local empty = resultsFrame:GetNumBrowseResults() == 0
-	local everyPageIn = C_AuctionHouse.HasFullBrowseResults()
-	if search and empty and everyPageIn and IsWorking() then
+	if search and resultsFrame:GetNumBrowseResults() == 0 and C_AuctionHouse.HasFullBrowseResults() and IsWorking() then
 		list.ResultsText:Hide()
 		list.LoadingSpinner:Show()
 		spinnerShown = true
 	elseif spinnerShown then
 		spinnerShown = false
 		list.LoadingSpinner:Hide()
-		list.ResultsText:SetShown(empty and everyPageIn)
+		list.state = nil
+		list:RefreshScrollFrame()
 	end
 end
 
@@ -317,7 +325,7 @@ local function Ask()
 		end
 		return
 	end
-	if IsEmpty(endingQueue) or auctionFrame:GetDisplayMode() ~= AuctionHouseFrameDisplayMode.Buy then
+	if IsEmpty(endingQueue) or not IsListShowing() then
 		return
 	end
 	local ending = endingQueue[endingQueue.head]
@@ -384,15 +392,16 @@ local function OwnsList()
 	return search ~= nil and resultsFrame.browseResults == search.shown
 end
 
--- Asks for the search's next page of results. Blizzard's list asks only while it shows few
--- results, but filtering and sorting need them all: the addon asks after each page, when the
--- auction house's throttle is ready. Once every page has arrived, a re-sorted search needs no
--- more; Blizzard's list still asks by itself while it shows few results, but an empty list
--- never asks, so the addon does, until the server has no more.
+-- Asks for the search's next page of results. Filtering and sorting need every page, so the
+-- addon asks after each one, one request at a time, when the auction house's throttle is ready.
+-- It waits while the player views an item or another tab: their own requests (an item's
+-- auctions, buying) go first, and the worker asks again once the list is back (see Work).
+-- Once every page has arrived, a re-sorted search needs no more.
 local function RequestNextPage()
 	if not search then
 		return
 	end
+	search.pagePaused = false
 	if C_AuctionHouse.HasFullBrowseResults() then
 		search.complete = true
 		events:UnregisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
@@ -402,7 +411,11 @@ local function RequestNextPage()
 	if search.complete and #search.shown > 0 then
 		return
 	end
-	if C_AuctionHouse.IsThrottledMessageSystemReady() then
+	if not IsListShowing() then
+		search.pagePaused = true
+		events:UnregisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+		worker:Show()
+	elseif C_AuctionHouse.IsThrottledMessageSystemReady() then
 		events:UnregisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
 		C_AuctionHouse.RequestMoreBrowseResults()
 	else
@@ -432,6 +445,9 @@ local function Work()
 	end
 	IssueLoads()
 	Ask()
+	if search.pagePaused and IsListShowing() then
+		RequestNextPage()
+	end
 	local deadline = GetTimePreciseSec() + FRAME_BUDGET
 	while not IsEmpty(readQueue) and GetTimePreciseSec() < deadline do
 		local entry = Take(readQueue)
@@ -451,9 +467,10 @@ local function Work()
 		end
 	end
 	-- Asleep until an event brings more to do (item data, a page, item key info), but awake
-	-- while endings are to be learned: asking is paced and checked each frame.
+	-- while endings are to be learned (asking is paced and checked each frame) and while the
+	-- next page waits for the list to be back on screen.
 	if IsEmpty(readQueue) and (IsEmpty(loadQueue) or loadsInFlight >= MAX_ITEM_LOADS) and not redrawPending
-		and not asking and IsEmpty(endingQueue) then
+		and not asking and IsEmpty(endingQueue) and not search.pagePaused then
 		worker:Hide()
 	end
 	UpdateEmptyList()
@@ -511,8 +528,9 @@ events:SetScript("OnEvent", function(_, event, ...)
 	end
 end)
 
--- Runs right after the results frame takes a search's first results or the same search's
--- re-sorted results (added is nil), or appends a further page to them (added).
+-- Runs right after the results frame takes a search's first results, the same search's
+-- re-sorted or updated results (added is nil: an item's auctions arriving also update its row),
+-- or appends a further page to them (added).
 local function OnResults(added)
 	if added then
 		-- Blizzard appended the page to the list on screen. Go on only if that list is the one
@@ -524,16 +542,24 @@ local function OnResults(added)
 	else
 		-- Favorites are never filtered, as Blizzard's own filters don't apply to them.
 		if not searchStats or auctionFrame.isDisplayingFavorites then
+			searchStats = nil
 			StopSearch()
 			return
 		end
 		-- A new search starts over (OnSearchSent stops the old one). The same search re-sorted
-		-- keeps what it has and takes in the fresher results.
+		-- or updated keeps what it has and takes in the fresher results.
 		if not search then
 			StartSearch(searchStats)
 		end
 		Merge(resultsFrame.browseResults)
 	end
+	-- Blizzard's list asks for the next page by itself whenever fewer than 30 rows are left
+	-- below the last one on screen (BROWSE_SCROLL_OFFSET_REFRESH_THRESHOLD), on every redraw and
+	-- scroll, without waiting for the throttle. A filtered list is short, so it would ask on
+	-- every redraw on top of the addon's paced requests, and the extra requests queue up
+	-- (AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED, seen in game). The addon fetches every page
+	-- itself, so its list goes without; Blizzard sets it again with the next search's results.
+	resultsFrame.ItemList:SetRefreshCallback(nil)
 	Redraw()
 	RequestNextPage()
 end
@@ -545,6 +571,17 @@ local function OnSearchSent()
 	StopSearch()
 end
 
+-- The favorites list was asked for (the star button, or the auction house opening with
+-- favorites). It is never filtered, and neither is any update of it later: opening one of the
+-- favorites clears Blizzard's isDisplayingFavorites (AuctionHouseFrameMixin:QueryItem) while the
+-- list behind it is still the favorites.
+local function OnQueryAll(searchContext)
+	if searchContext == AuctionHouseSearchContext.AllFavorites then
+		searchStats = nil
+		StopSearch()
+	end
+end
+
 -- A column header was clicked: Blizzard sends the search again in the new order. The matches
 -- already found are sorted at once; the search's new results merge in when they arrive.
 local function OnSortChanged()
@@ -553,17 +590,15 @@ local function OnSortChanged()
 	end
 end
 
--- Puts every result of the search back on screen, unfiltered.
+-- Puts every result of the search back on screen, unfiltered: Blizzard's list rebuilds itself
+-- from the auction house's results, with its own asking for more pages. Called after an error,
+-- with the filters already off, so the addon's hook on it does nothing.
 local function ShowAllResults()
-	if OwnsList() then
-		local all = {}
-		for index, entry in ipairs(search.entries) do
-			all[index] = entry.result
-		end
-		resultsFrame.browseResults = all
-		resultsFrame.ItemList:DirtyScrollFrame()
-	end
+	local owned = OwnsList()
 	StopSearch()
+	if owned then
+		resultsFrame:UpdateBrowseResults()
+	end
 end
 
 -- The filters run inside Blizzard's auction house code, right after it gets results. An error
@@ -665,10 +700,11 @@ local function FindPieces()
 	for _, group in ipairs(ns.STAT_GROUPS) do
 		groupsNamed = groupsNamed and type(_G[group.name]) == "string"
 	end
-	if frame and frame.SendBrowseQuery and frame.GetSortsForContext and frame.GetBrowseSearchContext and frame.GetDisplayMode
+	if frame and frame.SendBrowseQuery and frame.QueryAll and frame.GetSortsForContext and frame.GetBrowseSearchContext and frame.GetDisplayMode
 		and AuctionHouseFrameDisplayMode and AuctionHouseFrameDisplayMode.Buy
+		and AuctionHouseSearchContext and AuctionHouseSearchContext.AllFavorites
 		and results and results.UpdateBrowseResults and results.Reset and results.SetSortOrder and results.GetNumBrowseResults
-		and list and list.RefreshScrollFrame and list.DirtyScrollFrame and list.ResultsText and list.LoadingSpinner
+		and list and list.RefreshScrollFrame and list.SetRefreshCallback and list.SetState and list.ResultsText and list.LoadingSpinner
 		and searchBar and searchBar.UpdateClearFiltersButton
 		and filter and filter.Reset and filter.GetFilters and filter.GetLevelRange and filter.ClearFiltersButton
 		and type(PET_BATTLE_STATS_LABEL) == "string" and groupsNamed
@@ -687,6 +723,9 @@ local function Install()
 
 	hooksecurefunc(frame, "SendBrowseQuery", function()
 		Guarded(OnSearchSent)
+	end)
+	hooksecurefunc(frame, "QueryAll", function(_, searchContext)
+		Guarded(OnQueryAll, searchContext)
 	end)
 	hooksecurefunc(results, "UpdateBrowseResults", function(_, added)
 		Guarded(OnResults, added)
