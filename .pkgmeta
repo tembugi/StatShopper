@@ -1,7 +1,7 @@
 # CurseForge's packager: it builds a file from each new tag pushed to GitHub. It doesn't read
 # .gitattributes, so what stays out of the package is listed here too (files starting with a
 # dot stay out by themselves). The changelog CurseForge shows is CHANGELOG.md.
-package-as: FindMyStats
+package-as: StatShopper
 
 manual-changelog:
   filename: CHANGELOG.md

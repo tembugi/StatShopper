@@ -243,7 +243,7 @@ end
 -- convert the older layout in NormalizeSaved.
 local SAVE_FORMAT = 1
 
--- Runs on every load with the saved FindMyStatsDB (per character) and returns it rebuilt from
+-- Runs on every load with the saved StatShopperDB (per character) and returns it rebuilt from
 -- the fields the addon uses: the save format and the ticked stats, by key. Anything else, left
 -- by older versions or damaged, is dropped. A new saved field has to be added here too, or it
 -- is dropped on the next load.
@@ -262,11 +262,11 @@ function ns.NormalizeSaved(old)
 	return clean
 end
 
--- The account-wide saved layout's version (FindMyStatsAccountDB). Raise it only when a change
+-- The account-wide saved layout's version (StatShopperAccountDB). Raise it only when a change
 -- stores the endings differently, and convert the older layout in NormalizeAccount.
 local ACCOUNT_FORMAT = 1
 
--- Runs on every load with the saved FindMyStatsAccountDB and the game's build number, and
+-- Runs on every load with the saved StatShopperAccountDB and the game's build number, and
 -- returns it rebuilt: the random endings learned so far, by the auction house's ending number,
 -- each with the stat names it adds (a set, possibly empty). They are kept only for the build they
 -- were learned on: a game update may change what an ending adds, and they are learned again.

@@ -6,7 +6,7 @@
 ---@diagnostic disable: undefined-global
 
 local ns = {}
-assert(loadfile("Stats.lua"))("FindMyStats", ns)
+assert(loadfile("Stats.lua"))("StatShopper", ns)
 
 local failures = 0
 

@@ -1,5 +1,5 @@
-# Renders the logo, FindMyStats-logo.svg (the drawing, 1024 px), to:
-# - FindMyStats-logo.png, 400 x 400, for CurseForge
+# Renders the logo, StatShopper-logo.svg (the drawing, 1024 px), to:
+# - StatShopper-logo.png, 400 x 400, for CurseForge
 # - ../Icon.tga, 128 x 128, the addon's icon in the game's addon list (## IconTexture)
 # Run in this folder: python3 make_logo.py. Needs macOS (its Georgia and Palatino fonts) and
 # Google Chrome, which draws the SVG.
@@ -12,7 +12,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-NAME = "FindMyStats"
+NAME = "StatShopper"
 
 with tempfile.TemporaryDirectory() as tmp:
     shot = os.path.join(tmp, "logo-1024.png")

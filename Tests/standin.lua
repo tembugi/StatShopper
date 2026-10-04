@@ -1,4 +1,4 @@
--- A stand-in for the game around FindMyStats.lua, for what Tests/run.lua can't check on its own:
+-- A stand-in for the game around StatShopper.lua, for what Tests/run.lua can't check on its own:
 -- the addon inside Blizzard's auction house, with a simulated server.
 -- Run: luajit Tests/standin.lua <scenario>, in the addon folder (Tests/run.lua runs them all).
 -- Exits non-zero when the scenario fails.
@@ -410,8 +410,8 @@ AuctionHouseFrame.displayMode = AuctionHouseFrameDisplayMode.Buy
 --------------------------------------------------------------------------------
 
 local ns = {}
-assert(loadfile("Stats.lua"))("FindMyStats", ns)
-assert(loadfile("FindMyStats.lua"))("FindMyStats", ns)
+assert(loadfile("Stats.lua"))("StatShopper", ns)
+assert(loadfile("StatShopper.lua"))("StatShopper", ns)
 
 --------------------------------------------------------------------------------
 -- Playing
@@ -502,8 +502,8 @@ local function MakeItems(uncachedEvery)
 end
 
 local function TickStats(stats)
-	FindMyStatsDB.stats = {}
-	for _, key in ipairs(stats) do FindMyStatsDB.stats[key] = true end
+	StatShopperDB.stats = {}
+	for _, key in ipairs(stats) do StatShopperDB.stats[key] = true end
 end
 
 --------------------------------------------------------------------------------
@@ -673,7 +673,7 @@ scenarios["menu title"] = function()
 	local frame = { fontString = FontString(title) }
 	function frame:AttachFontString() attached = FontString("") return attached end
 	local width, height = initializers[1](frame)
-	if title ~= "Find My Stats" then
+	if title ~= "Stat Shopper" then
 		return false, "title " .. tostring(title)
 	end
 	if not (attached and attached.text:match("^v%d+%.%d+%.%d+$") and attached.justify == "RIGHT" and attached.points[1] == "RIGHT") then

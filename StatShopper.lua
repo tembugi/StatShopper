@@ -2,9 +2,9 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- menu's title and the chat line about a changed auction house use this, which /reload picks up.
-local VERSION = "1.0.2"
+local VERSION = "1.1.0"
 -- The addon's name as the player sees it: the start of chat lines.
-local ADDON_TITLE = "Find My Stats"
+local ADDON_TITLE = "Stat Shopper"
 
 -- Blizzard's auction house loads when it is first opened. Its Filter dropdown carries this
 -- tag, which Blizzard's menu system lets addons add elements to (Menu.ModifyMenu).
@@ -241,7 +241,7 @@ local function ReadStats(entry)
 	nameCache[entry.key] = info.itemName
 	local own = C_Item.GetItemStats("item:" .. itemID)
 	local ending = itemKey.itemSuffix
-	local adds = ending ~= 0 and FindMyStatsAccountDB.endings[ending]
+	local adds = ending ~= 0 and StatShopperAccountDB.endings[ending]
 	if ending == 0 or adds then
 		entry.stats = ns.RaisedByItemStats(own, adds or nil)
 		statsCache[entry.key] = entry.stats
@@ -298,7 +298,7 @@ local function FinishAsking(adds)
 	local ending = asking.ending
 	asking = nil
 	if adds then
-		FindMyStatsAccountDB.endings[ending] = adds
+		StatShopperAccountDB.endings[ending] = adds
 		ApplyEnding(ending, adds)
 		return
 	end
@@ -567,7 +567,7 @@ end
 -- A search was sent with the ticks of this moment. Blizzard's code gets its results later,
 -- after this returns.
 local function OnSearchSent()
-	searchStats = ns.Ticked(FindMyStatsDB.stats)
+	searchStats = ns.Ticked(StatShopperDB.stats)
 	StopSearch()
 end
 
@@ -622,11 +622,11 @@ end
 --------------------------------------------------------------------------------
 
 local function IsTicked(key)
-	return FindMyStatsDB.stats[key] == true
+	return StatShopperDB.stats[key] == true
 end
 
 local function AnyTicked()
-	return next(FindMyStatsDB.stats) ~= nil
+	return next(StatShopperDB.stats) ~= nil
 end
 
 -- Blizzard shows the red X on the Filter button while its filters differ from the defaults,
@@ -652,7 +652,7 @@ local function UpdateClearButton()
 end
 
 local function ToggleStat(key)
-	FindMyStatsDB.stats[key] = not IsTicked(key) or nil
+	StatShopperDB.stats[key] = not IsTicked(key) or nil
 	UpdateClearButton()
 end
 
@@ -661,7 +661,7 @@ local function OnStatClicked(key)
 end
 
 local function UntickAll()
-	wipe(FindMyStatsDB.stats)
+	wipe(StatShopperDB.stats)
 end
 
 -- The addon's version on the title's row, right-aligned in the game's grey for disabled text,
@@ -769,8 +769,8 @@ local function Install()
 end
 
 EventUtil.ContinueOnAddOnLoaded(addonName, function()
-	FindMyStatsDB = ns.NormalizeSaved(FindMyStatsDB)
-	FindMyStatsAccountDB = ns.NormalizeAccount(FindMyStatsAccountDB, (select(2, GetBuildInfo())))
+	StatShopperDB = ns.NormalizeSaved(StatShopperDB)
+	StatShopperAccountDB = ns.NormalizeAccount(StatShopperAccountDB, (select(2, GetBuildInfo())))
 	EventUtil.ContinueOnAddOnLoaded(AUCTION_UI, function()
 		Guarded(Install)
 	end)
