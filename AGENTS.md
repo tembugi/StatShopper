@@ -62,3 +62,13 @@ The name is "Find My Stats" (the user's choice; `ADDON_TITLE` in the code, also 
 - Never send requests of its own except these two, both paced: the next page of the player's own search, and one row's auctions to learn an ending the account hasn't seen (see Filtering). Never filter favorites.
 - Never change Blizzard's saved filters (`g_auctionHouseFilters`).
 - Never call anything that builds a tooltip (`C_TooltipInfo`, `GameTooltip`): one random suffix makes it stall the game for 14 s (see Filtering).
+
+## Logo
+
+`Logo/FindMyStats-logo.svg` is the logo, agreed with the user on 2026-10-04 after many rounds: a tooltip window in Just the Trees' gold, a list of stats scrolling past with "+8 STR" found under a magnifying glass (its handle at 7 o'clock, joined into the rim), a faded longsword for the item type and the game's red Buy button. Rules it was measured to:
+- Stat numbers in Palatino Bold: its lining figures stand on the baseline and reach cap height; Georgia's old-style figures sat low (up to 37 of 200 units off).
+- Sword and button on the list's rows: tip on AGI, guard on STR, pommel on AP, button on HIT.
+- The scroll fade by contrast against the window (full grey text 2.05:1): the cut lines (HEAL, FISHING) at 36% (1.21:1), AGI's top and HIT's bottom at 50% (1.33:1), then a smooth ease to full.
+- The Buy button after the game's: black edge, thin grey ring, black gap, flat dark red face, gold text in regular weight.
+
+`Logo/make_logo.py` renders the 400 x 400 CurseForge PNG and `Icon.tga`, the addon list's icon (`## IconTexture`; the user asked for the logos in game, 2026-10-04).

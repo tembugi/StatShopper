@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- menu's title and the chat line about a changed auction house use this, which /reload picks up.
-local VERSION = "1.0.0"
+local VERSION = "1.0.1"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Find My Stats"
 
