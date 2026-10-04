@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- menu's title and the chat line about a changed auction house use this, which /reload picks up.
-local VERSION = "1.1.0"
+local VERSION = "1.1.1"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Stat Shopper"
 
@@ -733,7 +733,7 @@ end
 local function Install()
 	local frame, results, searchBar, filter = FindPieces()
 	if not frame then
-		SayProblem("The stat filters are off: the auction house has changed since version " .. VERSION .. ".", "Look for an update.")
+		SayProblem("The stat filters are off: the Auction House has changed since version " .. VERSION .. ".", "Look for an update.")
 		return
 	end
 	auctionFrame, resultsFrame, filterButton = frame, results, filter

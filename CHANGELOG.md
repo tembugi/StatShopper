@@ -1,4 +1,3 @@
-## v1.1.0
+## v1.1.1
 
-- New name: Stat Shopper (was Find My Stats).
-- Your ticked stats start empty once after this update, and the first big search is slower again.
+- "Auction House" is now capitalized in the addon list and in the addon's messages.
