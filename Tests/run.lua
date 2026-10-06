@@ -104,46 +104,46 @@ Test("the game's stat table gives the stats an item raises", function()
 	SameSet(ns.RaisedByItemStats({}), {}, "an item without stats")
 end)
 
--- What the game's stat table gave in game (2026-10-04) for Watcher's Cap: the item alone, and a
--- real auction's link with "of the Whale" and with "of the Physician".
-local CAP = { RESISTANCE0_NAME = 36 }
-local CAP_OF_THE_WHALE = { RESISTANCE0_NAME = 36, ITEM_MOD_STAMINA_SHORT = 8, ITEM_MOD_SPIRIT_SHORT = 8 }
-local CAP_OF_THE_PHYSICIAN = {
-	RESISTANCE0_NAME = 36,
-	ITEM_MOD_INTELLECT_SHORT = 5,
-	ITEM_MOD_STAMINA_SHORT = 9,
-	ITEM_MOD_SPELL_HEALING_DONE_SHORT = 8,
-	ITEM_MOD_SPELL_DAMAGE_DONE_SHORT = 3,
+-- A made-up hat, shaped like what the game's stat table gave in game (2026-10-04): the item alone
+-- has only armor; a real auction's link adds its ending's stats, here an ending with two
+-- attributes and a healer's ending with healing, a little spell damage and more.
+local HAT = { RESISTANCE0_NAME = 20 }
+local HAT_OF_TWO = { RESISTANCE0_NAME = 20, ITEM_MOD_STAMINA_SHORT = 4, ITEM_MOD_SPIRIT_SHORT = 4 }
+local HAT_OF_HEALING = {
+	RESISTANCE0_NAME = 20,
+	ITEM_MOD_INTELLECT_SHORT = 3,
+	ITEM_MOD_STAMINA_SHORT = 2,
+	ITEM_MOD_SPELL_HEALING_DONE_SHORT = 6,
+	ITEM_MOD_SPELL_DAMAGE_DONE_SHORT = 2,
 }
 
 Test("an ending adds what the real auction has beyond the item itself", function()
-	SameSet(ns.EndingAdds(CAP_OF_THE_WHALE, CAP), SetOf("ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"), "of the Whale")
-	SameSet(ns.EndingAdds(CAP_OF_THE_PHYSICIAN, CAP), SetOf("ITEM_MOD_INTELLECT_SHORT", "ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPELL_HEALING_DONE_SHORT", "ITEM_MOD_SPELL_DAMAGE_DONE_SHORT"), "of the Physician, stats not in the menu kept too")
+	SameSet(ns.EndingAdds(HAT_OF_TWO, HAT), SetOf("ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"), "two attributes")
+	SameSet(ns.EndingAdds(HAT_OF_HEALING, HAT), SetOf("ITEM_MOD_INTELLECT_SHORT", "ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPELL_HEALING_DONE_SHORT", "ITEM_MOD_SPELL_DAMAGE_DONE_SHORT"), "a healer's ending, stats not in the menu kept too")
 	SameSet(ns.EndingAdds({ ITEM_MOD_STAMINA_SHORT = 13 }, { ITEM_MOD_STAMINA_SHORT = 5 }), SetOf("ITEM_MOD_STAMINA_SHORT"), "more of a stat the item has")
-	SameSet(ns.EndingAdds(CAP, CAP), {}, "an ending that adds nothing")
-	SameSet(ns.EndingAdds(CAP_OF_THE_WHALE, nil), SetOf("RESISTANCE0_NAME", "ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"), "no table for the item")
-	SameSet(ns.EndingAdds(nil, CAP), {}, "no table for the auction")
+	SameSet(ns.EndingAdds(HAT, HAT), {}, "an ending that adds nothing")
+	SameSet(ns.EndingAdds(HAT_OF_TWO, nil), SetOf("RESISTANCE0_NAME", "ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"), "no table for the item")
+	SameSet(ns.EndingAdds(nil, HAT), {}, "no table for the auction")
 end)
 
 Test("an item raises its own stats and what its ending adds", function()
-	SameSet(ns.RaisedByItemStats(CAP, ns.EndingAdds(CAP_OF_THE_WHALE, CAP)), SetOf("STAMINA", "SPIRIT"), "Watcher's Cap of the Whale")
+	SameSet(ns.RaisedByItemStats(HAT, ns.EndingAdds(HAT_OF_TWO, HAT)), SetOf("STAMINA", "SPIRIT"), "the hat with two attributes")
 	SameSet(ns.RaisedByItemStats({ ITEM_MOD_STRENGTH_SHORT = 4 }, SetOf("ITEM_MOD_STAMINA_SHORT")), SetOf("STRENGTH", "STAMINA"), "own stats and the ending's")
 	SameSet(ns.RaisedByItemStats(nil, SetOf("ITEM_MOD_INTELLECT_SHORT")), SetOf("INTELLECT"), "no table, ending only")
-	SameSet(ns.RaisedByItemStats(CAP, {}), {}, "an ending that adds nothing")
+	SameSet(ns.RaisedByItemStats(HAT, {}), {}, "an ending that adds nothing")
 end)
 
--- Staff of Jordan (873) in game (2026-10-04): the scan found Intellect, Spirit and Spell Power
--- in its stat table; its tooltip says +11 Intellect, +11 Spirit and "Increases damage and
--- healing done by magical spells and effects by up to 60".
-local STAFF_OF_JORDAN = { ITEM_MOD_INTELLECT_SHORT = 11, ITEM_MOD_SPIRIT_SHORT = 11, ITEM_MOD_SPELL_POWER_SHORT = 60 }
+-- A made-up staff with Spell Power. In game (2026-10-04) gear whose tooltip says "Increases damage
+-- and healing done by magical spells and effects" has it in the stat table as Spell Power.
+local SPELL_POWER_STAFF = { ITEM_MOD_INTELLECT_SHORT = 6, ITEM_MOD_SPIRIT_SHORT = 6, ITEM_MOD_SPELL_POWER_SHORT = 30 }
 
 Test("Spell Power gear counts for Spell Damage and for Spell Healing", function()
-	SameSet(ns.RaisedByItemStats(STAFF_OF_JORDAN), SetOf("INTELLECT", "SPIRIT", "SPELL_DAMAGE", "SPELL_HEALING"), "Staff of Jordan")
+	SameSet(ns.RaisedByItemStats(SPELL_POWER_STAFF), SetOf("INTELLECT", "SPIRIT", "SPELL_DAMAGE", "SPELL_HEALING"), "the staff")
 	SameSet(ns.RaisedByItemStats({ ITEM_MOD_SPELL_HEALING_DONE_SHORT = 20 }), SetOf("SPELL_HEALING"), "healing only")
 	SameSet(ns.RaisedByItemStats({ ITEM_MOD_SPELL_DAMAGE_DONE_SHORT = 7 }), SetOf("SPELL_DAMAGE"), "damage only")
-	SameSet(ns.RaisedByItemStats(CAP, ns.EndingAdds(CAP_OF_THE_PHYSICIAN, CAP)), SetOf("INTELLECT", "STAMINA", "SPELL_DAMAGE", "SPELL_HEALING"), "of the Physician: healing and a little damage")
+	SameSet(ns.RaisedByItemStats(HAT, ns.EndingAdds(HAT_OF_HEALING, HAT)), SetOf("INTELLECT", "STAMINA", "SPELL_DAMAGE", "SPELL_HEALING"), "a healer's ending: healing and a little damage")
 	local both = SetOf("SPELL_DAMAGE", "SPELL_HEALING")
-	Equal(ns.HasAll(ns.RaisedByItemStats(STAFF_OF_JORDAN), both), true, "both ticked: Staff of Jordan")
+	Equal(ns.HasAll(ns.RaisedByItemStats(SPELL_POWER_STAFF), both), true, "both ticked: the staff")
 	Equal(ns.HasAll(ns.RaisedByItemStats({ ITEM_MOD_SPELL_HEALING_DONE_SHORT = 20 }), both), false, "both ticked: healing only")
 end)
 
@@ -210,7 +210,7 @@ local function Orders(entries)
 end
 
 Test("sorting by price, then name, as the browse list does by default", function()
-	local entries = { Entry(1, 500, "Brigade Boots"), Entry(2, 120, "Ridge Cleaver"), Entry(3, 500, "Augural Shroud"), Entry(4, 9000, "Lionheart Helm") }
+	local entries = { Entry(1, 500, "Boots"), Entry(2, 120, "Cleaver"), Entry(3, 500, "Amulet"), Entry(4, 9000, "Helm") }
 	ns.SortEntries(entries, { { sortOrder = PRICE, reverseSort = false }, { sortOrder = NAME, reverseSort = false } }, SORT_VALUES)
 	Equal(Orders(entries), "2,3,1,4", "cheapest first, same price by name")
 end)
@@ -299,15 +299,15 @@ end)
 
 Test("learned endings are kept on the same build", function()
 	local clean = ns.NormalizeAccount({ format = 1, build = "70205", endings = {
-		[14301] = SetOf("ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"),
-		[200] = {},
+		[1001] = SetOf("ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"),
+		[1002] = {},
 	} }, "70205")
-	SameSet(clean.endings[14301], SetOf("ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"), "of the Whale")
-	SameSet(clean.endings[200], {}, "an ending that adds nothing is still known")
+	SameSet(clean.endings[1001], SetOf("ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_SPIRIT_SHORT"), "an ending with two attributes")
+	SameSet(clean.endings[1002], {}, "an ending that adds nothing is still known")
 end)
 
 Test("learned endings are dropped on another build or format", function()
-	local saved = { format = 1, build = "70205", endings = { [14301] = SetOf("ITEM_MOD_STAMINA_SHORT") } }
+	local saved = { format = 1, build = "70205", endings = { [1001] = SetOf("ITEM_MOD_STAMINA_SHORT") } }
 	Equal(next(ns.NormalizeAccount(saved, "70300").endings), nil, "a game update")
 	saved.format = 0
 	Equal(next(ns.NormalizeAccount(saved, "70205").endings), nil, "an older format")
@@ -318,18 +318,18 @@ Test("broken learned endings are dropped", function()
 		format = 1,
 		build = "70205",
 		endings = {
-			[14301] = { ITEM_MOD_STAMINA_SHORT = true, ITEM_MOD_SPIRIT_SHORT = "yes", [5] = true },
+			[1001] = { ITEM_MOD_STAMINA_SHORT = true, ITEM_MOD_SPIRIT_SHORT = "yes", [5] = true },
 			[0] = SetOf("ITEM_MOD_STAMINA_SHORT"),
 			[1.5] = SetOf("ITEM_MOD_STAMINA_SHORT"),
-			["14301"] = SetOf("ITEM_MOD_STAMINA_SHORT"),
+			["1001"] = SetOf("ITEM_MOD_STAMINA_SHORT"),
 			[99] = "ITEM_MOD_STAMINA_SHORT",
 		},
 		leftover = true,
 	}, "70205")
-	SameSet(clean.endings[14301], SetOf("ITEM_MOD_STAMINA_SHORT"), "only names marked true")
+	SameSet(clean.endings[1001], SetOf("ITEM_MOD_STAMINA_SHORT"), "only names marked true")
 	Equal(clean.endings[0], nil, "no ending")
 	Equal(clean.endings[1.5], nil, "not a whole number")
-	Equal(clean.endings["14301"], nil, "not a number")
+	Equal(clean.endings["1001"], nil, "not a number")
 	Equal(clean.endings[99], nil, "adds that aren't a table")
 	Equal(clean.leftover, nil, "leftover field")
 end)
