@@ -127,10 +127,12 @@ local Guarded -- runs addon code inside Blizzard's without breaking it (defined 
 
 -- MEASURING BUILD (remove before release). A search that found nothing although searching
 -- again found items (2026-10-04, and 2026-10-12 with Armor): each search's events are
--- recorded, and if the list still has no rows TRACE_CHECK seconds after the search was sent,
--- the record goes to the game's error handler, which writes it to Logs/General.log.
-local TRACE_CHECK = 6
-local TRACE_MAX = 80
+-- recorded, and if Blizzard's list shows "No results" for a search with stats ticked (checked
+-- every TRACE_CHECK seconds for TRACE_FOR seconds), the record goes to the game's error
+-- handler, which shows it and writes it to Logs/General.log.
+local TRACE_CHECK = 0.5
+local TRACE_FOR = 120
+local TRACE_MAX = 300
 local traceLines, traceStart, traceSearch = {}, 0, 0
 local function Trace(text, ...)
 	if #traceLines < TRACE_MAX then
@@ -562,7 +564,7 @@ end
 traceEvents:SetScript("OnEvent", function(_, event, ...)
 	local short = event:gsub("^AUCTION_HOUSE_", "")
 	if event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
-		Trace("event %s %d", short, #(... or {}))
+		return -- the addon's RESULTS line follows
 	elseif event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
 		Trace("event %s (full %s)", short, tostring(C_AuctionHouse.HasFullBrowseResults()))
 	else
@@ -630,15 +632,26 @@ local function OnSearchSent()
 	Trace("SEARCH %d sent: %d ticked, any %s, ready %s, full %s, asking %s", traceSearch, ticked, tostring(searchMatchAny),
 		tostring(C_AuctionHouse.IsThrottledMessageSystemReady()), tostring(C_AuctionHouse.HasFullBrowseResults()), tostring(asking ~= nil))
 	local thisSearch = traceSearch
-	C_Timer.After(TRACE_CHECK, function()
-		if thisSearch ~= traceSearch or not resultsFrame or resultsFrame:GetNumBrowseResults() > 0 then
+	if not searchStats then
+		return
+	end
+	local ticker
+	ticker = C_Timer.NewTicker(TRACE_CHECK, function()
+		local list = resultsFrame and resultsFrame.ItemList
+		if thisSearch ~= traceSearch or not list then
+			ticker:Cancel()
 			return
 		end
-		local list = resultsFrame.ItemList
-		Trace("CHECK: no rows; text %s \"%s\", spinner %s, full %s, Blizzard's results %d, search %s, working %s", tostring(list.ResultsText:IsShown()),
-			tostring(list.ResultsText:GetText()), tostring(list.LoadingSpinner:IsShown()), tostring(C_AuctionHouse.HasFullBrowseResults()),
-			#C_AuctionHouse.GetBrowseResults(), tostring(search ~= nil), tostring(IsWorking()))
-		print(NORMAL_FONT_COLOR:WrapTextInColorCode(ADDON_TITLE) .. ": search " .. thisSearch .. " has no rows. Its record went to the game's log.")
+		if GetTime() - traceStart > TRACE_FOR or resultsFrame:GetNumBrowseResults() > 0 or not list.ResultsText:IsShown()
+			or list.ResultsText:GetText() ~= BROWSE_NO_RESULTS then
+			if GetTime() - traceStart > TRACE_FOR then ticker:Cancel() end
+			return
+		end
+		ticker:Cancel()
+		Trace("CHECK: \"No results\"; spinner %s, full %s, Blizzard's results %d, search %s, working %s, owned %s, display Buy %s",
+			tostring(list.LoadingSpinner:IsShown()), tostring(C_AuctionHouse.HasFullBrowseResults()), #C_AuctionHouse.GetBrowseResults(),
+			tostring(search ~= nil), tostring(IsWorking()), tostring(search ~= nil and resultsFrame.browseResults == search.shown), tostring(IsListShowing()))
+		print(NORMAL_FONT_COLOR:WrapTextInColorCode(ADDON_TITLE) .. ": search " .. thisSearch .. " shows \"No results\". Its record is in the error window.")
 		CallErrorHandler("Stat Shopper trace, search " .. thisSearch .. ": " .. table.concat(traceLines, " | "))
 	end)
 end
