@@ -184,18 +184,37 @@ function ns.HasAll(raised, wanted)
 	return true
 end
 
+-- True when the item raises at least one wanted stat.
+function ns.HasAny(raised, wanted)
+	for key in pairs(wanted) do
+		if raised[key] then
+			return true
+		end
+	end
+	return false
+end
+
+-- True when the item raises the wanted stats: every one, or with matchAny ("Match any" in the
+-- menu) at least one.
+function ns.Matches(raised, wanted, matchAny)
+	if matchAny then
+		return ns.HasAny(raised, wanted)
+	end
+	return ns.HasAll(raised, wanted)
+end
+
 -- What tells one result row from another: the item, its item level and its random suffix
 -- ("of the Bear"), as in the auction house's own item keys.
 function ns.ResultKey(itemKey)
 	return itemKey.itemID .. ":" .. itemKey.itemLevel .. ":" .. itemKey.itemSuffix .. ":" .. itemKey.battlePetSpeciesID
 end
 
--- The entries whose items raise every wanted stat, in the order given. Entries whose stats
--- aren't read yet (entry.stats is nil) are left out.
-function ns.Matching(entries, wanted)
+-- The entries whose items raise the wanted stats (see Matches), in the order given. Entries
+-- whose stats aren't read yet (entry.stats is nil) are left out.
+function ns.Matching(entries, wanted, matchAny)
 	local matching = {}
 	for _, entry in ipairs(entries) do
-		if entry.stats and ns.HasAll(entry.stats, wanted) then
+		if entry.stats and ns.Matches(entry.stats, wanted, matchAny) then
 			matching[#matching + 1] = entry
 		end
 	end
@@ -244,13 +263,15 @@ end
 local SAVE_FORMAT = 1
 
 -- Runs on every load with the saved StatShopperDB (per character) and returns it rebuilt from
--- the fields the addon uses: the save format and the ticked stats, by key. Anything else, left
+-- the fields the addon uses: the save format, the ticked stats, by key, and whether one ticked
+-- stat is enough (matchAny, "Match any" in the menu; "Match all" by default). Anything else, left
 -- by older versions or damaged, is dropped. A new saved field has to be added here too, or it
 -- is dropped on the next load.
 function ns.NormalizeSaved(old)
 	local clean = {
 		format = SAVE_FORMAT,
 		stats = {},
+		matchAny = type(old) == "table" and old.matchAny == true,
 	}
 	if type(old) == "table" and type(old.stats) == "table" then
 		for key, ticked in pairs(old.stats) do

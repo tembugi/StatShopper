@@ -1,4 +1,3 @@
-## v1.1.2
+## v1.2.0
 
-- The addon list now describes Stat Shopper the same way as its CurseForge page.
-- "Auction House" is now capitalized in the addon list and in the addon's messages.
+- Added "Match all" and "Match any" to the Stat Shopper part of the Filter menu. "Match any" shows gear with at least one of the ticked stats.

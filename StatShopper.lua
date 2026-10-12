@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- menu's title and the chat line about a changed auction house use this, which /reload picks up.
-local VERSION = "1.1.2"
+local VERSION = "1.2.0"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Stat Shopper"
 
@@ -10,6 +10,15 @@ local ADDON_TITLE = "Stat Shopper"
 -- tag, which Blizzard's menu system lets addons add elements to (Menu.ModifyMenu).
 local AUCTION_UI = "Blizzard_AuctionHouseUI"
 local FILTER_MENU_TAG = "MENU_AUCTION_HOUSE_SEARCH_FILTER"
+
+-- The two choices on the row under the menu's title, side by side: an item needs every ticked
+-- stat, or one is enough. The game has no text for these, so they are English in every language.
+local MATCH_CHOICES = {
+	{ text = "Match all", matchAny = false },
+	{ text = "Match any", matchAny = true },
+}
+-- Space between the two choices.
+local MATCH_GAP = 16
 
 -- Only weapons and armor can match.
 local GEAR_CLASSES = {
@@ -60,8 +69,10 @@ local resultsFrame -- its BrowseResultsFrame: the search results list
 local filterButton -- the search bar's Filter dropdown, with Blizzard's red X (ClearFiltersButton)
 
 local searchStats -- the stats ticked when the last search was sent; nil when none were
+local searchMatchAny -- "Match any" was chosen when the last search was sent
 -- The stat-filtered search whose results are on screen, or nil:
 --   stats     the stats it was sent with
+--   matchAny  one of them is enough ("Match any"), else an item needs all of them
 --   entries   every result so far, in arrival order: { key, result, order, stats, name, own }
 --   byKey     ResultKey -> entry
 --   complete  true once every page of results has arrived
@@ -167,9 +178,9 @@ local function StopSearch()
 	UpdateEmptyList()
 end
 
-local function StartSearch(stats)
+local function StartSearch(stats, matchAny)
 	StopSearch()
-	search = { stats = stats, entries = {}, byKey = {}, complete = false, shown = {} }
+	search = { stats = stats, matchAny = matchAny, entries = {}, byKey = {}, complete = false, shown = {} }
 end
 
 local function Enqueue(entry)
@@ -206,7 +217,7 @@ local function WaitForEnding(ending, entry)
 end
 
 local function IsMatch(entry)
-	return entry.stats ~= nil and ns.HasAll(entry.stats, search.stats)
+	return entry.stats ~= nil and ns.Matches(entry.stats, search.stats, search.matchAny)
 end
 
 -- Reads the stats an entry's item raises from the game's stat table (C_Item.GetItemStats). An
@@ -376,7 +387,7 @@ end
 local function Redraw()
 	redrawPending = false
 	lastRedraw = GetTime()
-	local matching = ns.Matching(search.entries, search.stats)
+	local matching = ns.Matching(search.entries, search.stats, search.matchAny)
 	ns.SortEntries(matching, auctionFrame:GetSortsForContext(auctionFrame:GetBrowseSearchContext()), SORT_VALUES)
 	local shown = {}
 	for index, entry in ipairs(matching) do
@@ -549,7 +560,7 @@ local function OnResults(added)
 		-- A new search starts over (OnSearchSent stops the old one). The same search re-sorted
 		-- or updated keeps what it has and takes in the fresher results.
 		if not search then
-			StartSearch(searchStats)
+			StartSearch(searchStats, searchMatchAny)
 		end
 		Merge(resultsFrame.browseResults)
 	end
@@ -564,10 +575,11 @@ local function OnResults(added)
 	RequestNextPage()
 end
 
--- A search was sent with the ticks of this moment. Blizzard's code gets its results later,
+-- A search was sent with the ticks and the Match choice of this moment. Blizzard's code gets its results later,
 -- after this returns.
 local function OnSearchSent()
 	searchStats = ns.Ticked(StatShopperDB.stats)
+	searchMatchAny = StatShopperDB.matchAny
 	StopSearch()
 end
 
@@ -660,8 +672,11 @@ local function OnStatClicked(key)
 	Guarded(ToggleStat, key)
 end
 
+-- The red X: Blizzard puts its filters back to their defaults, and the addon unticks every stat
+-- and goes back to Match all.
 local function UntickAll()
 	wipe(StatShopperDB.stats)
+	StatShopperDB.matchAny = false
 end
 
 -- The addon's version on the title's row, right-aligned in the game's grey for disabled text,
@@ -681,11 +696,71 @@ local function AddVersion(frame)
 	return frame.fontString:GetUnboundedStringWidth() + gap + version:GetUnboundedStringWidth(), 20
 end
 
--- A title with the addon's name and version, and a submenu per group, at the end of Blizzard's
--- Filter dropdown, after the spacer Blizzard queues behind its last group, with lines between a
--- group's sections. A stat whose name the game doesn't have is left out.
+-- The row under the title: Match all and Match any side by side, drawn as Blizzard's menu draws a
+-- radio (MenuVariants.CreateRadio, Mainline): its circle and yellow tick, the text right of it,
+-- and the highlight of a menu button (MenuVariants.CreateHighlight) while the mouse is over it.
+-- Blizzard's menu has one element per row, so each choice is a button attached to the row
+-- (Compositor: attached frames, textures and text are released when the menu closes). A click
+-- changes the choice and moves the tick; the menu stays open, as it does for a checkbox.
+local function AddMatchChoices(frame)
+	local ticks = {}
+	local function ShowTicks()
+		for choice, tick in pairs(ticks) do
+			tick:SetShown(StatShopperDB.matchAny == choice.matchAny)
+		end
+	end
+	local x = 0
+	for _, choice in ipairs(MATCH_CHOICES) do
+		local button = frame:AttachFrame("Button")
+		local highlight = button:AttachTexture()
+		highlight:SetAllPoints()
+		highlight:SetBlendMode("ADD")
+		highlight:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+		highlight:SetDrawLayer("BACKGROUND")
+		highlight:Hide()
+		local circle = button:AttachTexture()
+		circle:SetAtlas("common-dropdown-tickradial", TextureKitConstants.UseAtlasSize)
+		circle:SetPoint("LEFT", -3, 0)
+		local tick = button:AttachTexture()
+		local layer, level = circle:GetDrawLayer()
+		tick:SetDrawLayer(layer, level + 1)
+		tick:SetAtlas("common-dropdown-icon-radialtick-yellow", TextureKitConstants.UseAtlasSize)
+		tick:SetPoint("TOPLEFT", circle, "TOPLEFT")
+		ticks[choice] = tick
+		local text = button:AttachFontString()
+		text:SetPoint("LEFT", circle, "RIGHT", 1, 0)
+		text:SetHeight(20)
+		text:SetTextToFit(choice.text)
+		local width = circle:GetWidth() - 3 + 1 + text:GetUnboundedStringWidth()
+		button:SetSize(width, 20)
+		button:SetPoint("LEFT", x, 0)
+		x = x + width + MATCH_GAP
+		button:EnableMouse(true)
+		button:RegisterForClicks("LeftButtonUp")
+		button:SetScript("OnEnter", function()
+			highlight:Show()
+		end)
+		button:SetScript("OnLeave", function()
+			highlight:Hide()
+		end)
+		button:SetScript("OnClick", function()
+			Guarded(function()
+				StatShopperDB.matchAny = choice.matchAny
+				ShowTicks()
+				PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+			end)
+		end)
+	end
+	ShowTicks()
+	return x - MATCH_GAP, 20
+end
+
+-- A title with the addon's name and version, Match all and Match any, and a submenu per group,
+-- at the end of Blizzard's Filter dropdown, after the spacer Blizzard queues behind its last
+-- group, with lines between a group's sections. A stat whose name the game doesn't have is left out.
 local function AddStatsMenu(root)
 	root:CreateTitle(ADDON_TITLE):AddInitializer(AddVersion)
+	root:CreateFrame():AddInitializer(AddMatchChoices)
 	for _, group in ipairs(ns.STAT_GROUPS) do
 		local submenu = root:CreateButton(_G[group.name])
 		for _, stat in ipairs(group.stats) do

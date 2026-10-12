@@ -163,6 +163,16 @@ Test("an item matches only with every wanted stat", function()
 	Equal(ns.HasAll({}, SetOf("SPIRIT")), false, "no stats")
 end)
 
+Test("with Match any, one wanted stat is enough", function()
+	local raised = SetOf("STRENGTH", "STAMINA")
+	Equal(ns.HasAny(raised, SetOf("STRENGTH", "AGILITY")), true, "one of them")
+	Equal(ns.HasAny(raised, SetOf("AGILITY", "SPIRIT")), false, "none of them")
+	Equal(ns.HasAny({}, SetOf("SPIRIT")), false, "no stats")
+	Equal(ns.Matches(raised, SetOf("STRENGTH", "AGILITY"), true), true, "Match any")
+	Equal(ns.Matches(raised, SetOf("STRENGTH", "AGILITY"), false), false, "Match all")
+	Equal(ns.Matches(raised, SetOf("STRENGTH", "STAMINA"), false), true, "Match all, both there")
+end)
+
 local function ItemKey(itemID, itemLevel, itemSuffix)
 	return { itemID = itemID, itemLevel = itemLevel or 0, itemSuffix = itemSuffix or 0, battlePetSpeciesID = 0 }
 end
@@ -188,6 +198,10 @@ Test("matching keeps entries with every wanted stat, in their order", function()
 	Equal(#matching, 2, "matches")
 	Equal(matching[1], entries[1], "first match")
 	Equal(matching[2], entries[4], "second match")
+	matching = ns.Matching(entries, SetOf("STRENGTH", "STAMINA"), true)
+	Equal(#matching, 3, "matches with Match any")
+	Equal(matching[2], entries[2], "one of the stats is enough")
+	Equal(matching[3], entries[4], "in their order")
 end)
 
 -- The auction house's sort orders (AuctionHouseSortOrder in the game's API documentation).
@@ -254,6 +268,7 @@ Test("saved data starts empty", function()
 		local clean = ns.NormalizeSaved(old)
 		Equal(clean.format, 1, "format")
 		Equal(next(clean.stats), nil, "no ticks from " .. tostring(old))
+		Equal(clean.matchAny, false, "Match all from " .. tostring(old))
 	end
 	local clean = ns.NormalizeSaved(nil)
 	Equal(next(clean.stats), nil, "no ticks from nothing")
@@ -263,6 +278,9 @@ Test("saved ticks are kept", function()
 	local clean = ns.NormalizeSaved({ format = 1, stats = { STRENGTH = true, STAMINA = true } })
 	Equal(clean.format, 1, "format")
 	SameSet(clean.stats, SetOf("STRENGTH", "STAMINA"), "ticks")
+	Equal(clean.matchAny, false, "saved before Match any existed: Match all")
+	clean = ns.NormalizeSaved({ format = 1, stats = { STRENGTH = true }, matchAny = true })
+	Equal(clean.matchAny, true, "Match any kept")
 end)
 
 Test("broken and leftover saved data is dropped", function()
@@ -278,11 +296,13 @@ Test("broken and leftover saved data is dropped", function()
 		},
 		filters = { INTELLECT = true },
 		version = "0.0.1",
+		matchAny = "yes",
 	})
 	Equal(clean.format, 1, "format")
 	SameSet(clean.stats, SetOf("STRENGTH"), "ticks")
 	Equal(clean.filters, nil, "leftover field")
 	Equal(clean.version, nil, "leftover field")
+	Equal(clean.matchAny, false, "a Match choice that isn't true")
 	clean = ns.NormalizeSaved({ stats = "STRENGTH" })
 	Equal(next(clean.stats), nil, "stats that aren't a table")
 end)
@@ -345,7 +365,7 @@ local function StandIn(scenario, arguments, queueSize)
 	end
 end
 
-for _, scenario in ipairs({ "menu title", "one request at a time", "paging waits while viewing an item", "favorites stay unfiltered", "re-sort", "error puts the list back" }) do
+for _, scenario in ipairs({ "menu title", "match choice", "match any", "one request at a time", "paging waits while viewing an item", "favorites stay unfiltered", "re-sort", "error puts the list back" }) do
 	Test("stand-in: " .. scenario, function()
 		StandIn(scenario)
 	end)

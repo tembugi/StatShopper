@@ -33,6 +33,9 @@ for _, name in ipairs({ "STAT_CATEGORY_ATTRIBUTES", "STAT_CATEGORY_ATTACK", "STA
 	_G[name] = name
 end
 AUCTION_HOUSE_DEFAULT_FILTERS = {}
+TextureKitConstants = { UseAtlasSize = true, IgnoreAtlasSize = false }
+SOUNDKIT = { IG_MAINMENU_OPTION_CHECKBOX_ON = 856 }
+function PlaySound() end
 AuctionHouseSearchContext = { BrowseAll = 1, AllFavorites = 2, BuyItems = 3, AllBids = 4 }
 local chat = {}
 local realPrint = print
@@ -501,9 +504,10 @@ local function MakeItems(uncachedEvery)
 	favorites = { Result(1), Result(5), Result(9, 500) }
 end
 
-local function TickStats(stats)
+local function TickStats(stats, matchAny)
 	StatShopperDB.stats = {}
 	for _, key in ipairs(stats) do StatShopperDB.stats[key] = true end
+	StatShopperDB.matchAny = matchAny == true
 end
 
 --------------------------------------------------------------------------------
@@ -668,6 +672,9 @@ scenarios["menu title"] = function()
 	function root:CreateButton()
 		return { CreateCheckbox = function() end, CreateDivider = function() end }
 	end
+	function root:CreateFrame()
+		return { AddInitializer = function() end }
+	end
 	Menu.modify(nil, root)
 	local attached
 	local frame = { fontString = FontString(title) }
@@ -681,6 +688,139 @@ scenarios["menu title"] = function()
 	end
 	if attached.color[1] ~= 0.5 or attached.fontObject ~= frame.fontString.fontObject or width < (#title + #attached.text) * 6 or height ~= 20 then
 		return false, "version's look or the row's size"
+	end
+	return true
+end
+
+-- Match any: a search finds items with at least one ticked stat; Match all, only those with
+-- every one. The choice of the moment a search is sent counts, as the ticks do.
+scenarios["match any"] = function()
+	MakeItems()
+	TickStats({ "INTELLECT", "STAMINA" }, true)
+	AuctionHouseFrame:SendBrowseQuery("everything")
+	Run(15)
+	if Shown() ~= "item1,item2,item3,item4,item7*,item9*" then
+		return false, "match any shows: " .. Shown()
+	end
+	StatShopperDB.matchAny = false
+	results:SetSortOrder(Enum.AuctionHouseSortOrder.Name)
+	Run(5)
+	if Shown() ~= "item1,item2,item3,item4,item7*,item9*" then
+		return false, "after a re-sort with Match all chosen but not searched: " .. Shown()
+	end
+	AuctionHouseFrame:SendBrowseQuery("everything")
+	Run(15)
+	if Shown() ~= "" then
+		return false, "match all shows: " .. Shown()
+	end
+	return true
+end
+
+-- The row under the title: Match all and Match any side by side, built from what Blizzard's menu
+-- attaches (Compositor.lua: frames, textures and text; CreateTexture and CreateFontString are
+-- disallowed on attached frames, SetFont on attached text). A click moves the tick, and the red X
+-- goes back to Match all.
+scenarios["match choice"] = function()
+	local function Region()
+		local region = { points = {}, shown = true, width = 1, height = 1 }
+		function region:SetPoint(point, relative, relativePoint, x, y)
+			if type(relative) == "number" then
+				relative, x = nil, relative
+			end
+			self.points[#self.points + 1] = { point = point, x = x or 0 }
+		end
+		function region:SetAllPoints() end
+		function region:SetSize(width, height) self.width, self.height = width, height end
+		function region:SetWidth(width) self.width = width end
+		function region:SetHeight(height) self.height = height end
+		function region:GetWidth() return self.width end
+		function region:Show() self.shown = true end
+		function region:Hide() self.shown = false end
+		function region:SetShown(shown) self.shown = not not shown end
+		function region:IsShown() return self.shown end
+		return region
+	end
+	local function Texture()
+		local texture = Region()
+		texture.layer, texture.level = "ARTWORK", 0
+		function texture:SetAtlas(atlas, useAtlasSize)
+			self.atlas = atlas
+			if useAtlasSize then self.width, self.height = 16, 16 end
+		end
+		function texture:SetTexture(file) self.file = file end
+		function texture:SetBlendMode() end
+		function texture:SetDrawLayer(layer, level) self.layer, self.level = layer, level or 0 end
+		function texture:GetDrawLayer() return self.layer, self.level end
+		return texture
+	end
+	local function FontString()
+		local fontString = Region()
+		fontString.width = 150
+		function fontString:SetFont() error("Use of function 'SetFont' is disallowed (Call).") end
+		function fontString:SetTextToFit(text) self.text = text self.width = #text * 6 end
+		function fontString:SetText(text) self.text = text end
+		function fontString:GetUnboundedStringWidth() return #self.text * 6 end
+		return fontString
+	end
+	local function AttachedFrame()
+		local frame = Region()
+		frame.textures, frame.fontStrings, frame.children, frame.scripts = {}, {}, {}, {}
+		function frame:CreateTexture() error("Use of function 'CreateTexture' is disallowed (Call).") end
+		function frame:CreateFontString() error("Use of function 'CreateFontString' is disallowed (Call).") end
+		function frame:AttachTexture() local texture = Texture() self.textures[#self.textures + 1] = texture return texture end
+		function frame:AttachFontString() local fontString = FontString() self.fontStrings[#self.fontStrings + 1] = fontString return fontString end
+		function frame:AttachFrame() local child = AttachedFrame() self.children[#self.children + 1] = child return child end
+		function frame:EnableMouse(enabled) self.mouse = enabled end
+		function frame:RegisterForClicks(...) self.clicks = { ... } end
+		function frame:SetScript(script, func) self.scripts[script] = func end
+		return frame
+	end
+	local rowInitializers = {}
+	local root = {}
+	function root:CreateTitle()
+		return { AddInitializer = function() end }
+	end
+	function root:CreateFrame()
+		return { AddInitializer = function(_, initializer) rowInitializers[#rowInitializers + 1] = initializer end }
+	end
+	function root:CreateButton()
+		return { CreateCheckbox = function() end, CreateDivider = function() end }
+	end
+	Menu.modify(nil, root)
+	if #rowInitializers ~= 1 then
+		return false, #rowInitializers .. " rows of the addon's own"
+	end
+	TickStats({ "STRENGTH" })
+	local row = AttachedFrame()
+	local width, height = rowInitializers[1](row)
+	local all, any = row.children[1], row.children[2]
+	if #row.children ~= 2 or all.fontStrings[1].text ~= "Match all" or any.fontStrings[1].text ~= "Match any" then
+		return false, "the row's choices"
+	end
+	local function Tick(button)
+		for _, texture in ipairs(button.textures) do
+			if texture.atlas == "common-dropdown-icon-radialtick-yellow" then
+				return texture
+			end
+		end
+	end
+	if not (Tick(all) and Tick(any) and Tick(all):IsShown() and not Tick(any):IsShown()) then
+		return false, "Match all isn't the one ticked at first"
+	end
+	if any.points[1].x < all.points[1].x + all.width or width < any.points[1].x + any.width or height ~= 20 then
+		return false, "the choices aren't side by side inside the row"
+	end
+	if not (any.mouse and any.scripts.OnClick and any.scripts.OnEnter and any.scripts.OnLeave) then
+		return false, "Match any can't be clicked or highlighted"
+	end
+	any.scripts.OnClick(any, "LeftButton")
+	if StatShopperDB.matchAny ~= true or Tick(all):IsShown() or not Tick(any):IsShown() then
+		return false, "clicking Match any"
+	end
+	-- The red X (Blizzard's Reset on the Filter button, hooked).
+	filterButton:Reset()
+	if StatShopperDB.matchAny ~= false or next(StatShopperDB.stats) then
+		return false, "the red X left Match any or a tick"
 	end
 	return true
 end

@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Stat Shopper
 ## Notes: Adds stat filters to the Auction House search. Filter by stats like Strength, Stamina or Spell Damage, and your search shows only gear that has them.
-## Version: 1.1.2
+## Version: 1.2.0
 ## Author: tembugi
 ## Category: Auction & Economy
 ## IconTexture: Interface\AddOns\StatShopper\Icon
