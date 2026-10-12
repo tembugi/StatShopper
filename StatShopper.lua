@@ -627,9 +627,10 @@ local function OnSearchSent()
 	searchMatchAny = StatShopperDB.matchAny
 	StopSearch()
 	traceLines, traceStart, traceSearch = {}, GetTime(), traceSearch + 1
-	local ticked = 0
-	for _ in pairs(searchStats or {}) do ticked = ticked + 1 end
-	Trace("SEARCH %d sent: %d ticked, any %s, ready %s, full %s, asking %s", traceSearch, ticked, tostring(searchMatchAny),
+	local tickedKeys = {}
+	for key in pairs(searchStats or {}) do tickedKeys[#tickedKeys + 1] = key end
+	local ticked = table.concat(tickedKeys, "+")
+	Trace("SEARCH %d sent: ticked %s, any %s, ready %s, full %s, asking %s", traceSearch, ticked, tostring(searchMatchAny),
 		tostring(C_AuctionHouse.IsThrottledMessageSystemReady()), tostring(C_AuctionHouse.HasFullBrowseResults()), tostring(asking ~= nil))
 	local thisSearch = traceSearch
 	if not searchStats then
