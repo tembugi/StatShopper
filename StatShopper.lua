@@ -699,9 +699,12 @@ end
 -- The row under the title: Match all and Match any side by side, drawn as Blizzard's menu draws a
 -- radio (MenuVariants.CreateRadio, Mainline): its circle and yellow tick, the text right of it,
 -- and the highlight of a menu button (MenuVariants.CreateHighlight) while the mouse is over it.
--- Blizzard's menu has one element per row, so each choice is a button attached to the row
--- (Compositor: attached frames, textures and text are released when the menu closes). A click
--- changes the choice and moves the tick; the menu stays open, as it does for a checkbox.
+-- Blizzard's menu has one element per row, so each choice is a button attached to the row with
+-- Blizzard's own MenuTemplates.AttachBasicButton (attached frames, textures and text are released
+-- when the menu closes). Attaching resets a button to hidden after showing it (Compositor's
+-- SetToDefaults), and that helper shows it again and turns its mouse on: 1.2.0's first build
+-- attached plain buttons and the row stayed empty. A click changes the choice and moves the
+-- tick; the menu stays open, as it does for a checkbox.
 local function AddMatchChoices(frame)
 	local ticks = {}
 	local function ShowTicks()
@@ -711,7 +714,7 @@ local function AddMatchChoices(frame)
 	end
 	local x = 0
 	for _, choice in ipairs(MATCH_CHOICES) do
-		local button = frame:AttachFrame("Button")
+		local button = MenuTemplates.AttachBasicButton(frame)
 		local highlight = button:AttachTexture()
 		highlight:SetAllPoints()
 		highlight:SetBlendMode("ADD")
@@ -735,7 +738,6 @@ local function AddMatchChoices(frame)
 		button:SetSize(width, 20)
 		button:SetPoint("LEFT", x, 0)
 		x = x + width + MATCH_GAP
-		button:EnableMouse(true)
 		button:RegisterForClicks("LeftButtonUp")
 		button:SetScript("OnEnter", function()
 			highlight:Show()
@@ -799,7 +801,7 @@ local function FindPieces()
 		and list and list.RefreshScrollFrame and list.SetRefreshCallback and list.SetState and list.ResultsText and list.LoadingSpinner
 		and searchBar and searchBar.UpdateClearFiltersButton
 		and filter and filter.Reset and filter.GetFilters and filter.GetLevelRange and filter.ClearFiltersButton
-		and DISABLED_FONT_COLOR and groupsNamed
+		and DISABLED_FONT_COLOR and MenuTemplates and MenuTemplates.AttachBasicButton and groupsNamed
 	then
 		return frame, results, searchBar, filter
 	end

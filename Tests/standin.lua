@@ -36,6 +36,24 @@ AUCTION_HOUSE_DEFAULT_FILTERS = {}
 TextureKitConstants = { UseAtlasSize = true, IgnoreAtlasSize = false }
 SOUNDKIT = { IG_MAINMENU_OPTION_CHECKBOX_ON = 856 }
 function PlaySound() end
+function SetPropagateMouseMotionDelegate(frame, propagate) frame.propagateMotion = propagate end
+-- Copied from Blizzard_Menu/MenuTemplates.lua (forever).
+MenuTemplates = {}
+function MenuTemplates.AttachBasicButton(parent, width, height)
+	local button = parent:AttachFrame("Button")
+	button:SetFrameStrata(parent:GetFrameStrata()) -- Machinery is broken.
+
+	-- SetToDefaults wipes button state, desired states must be explicitly set now.
+	button:Show()
+
+	SetPropagateMouseMotionDelegate(button, true)
+
+	button:SetMouseClickEnabled(true)
+	button:SetMouseMotionEnabled(true)
+	button:SetSize(width or 16, height or 16)
+
+	return button
+end
 AuctionHouseSearchContext = { BrowseAll = 1, AllFavorites = 2, BuyItems = 3, AllBids = 4 }
 local chat = {}
 local realPrint = print
@@ -769,8 +787,18 @@ scenarios["match choice"] = function()
 		function frame:CreateFontString() error("Use of function 'CreateFontString' is disallowed (Call).") end
 		function frame:AttachTexture() local texture = Texture() self.textures[#self.textures + 1] = texture return texture end
 		function frame:AttachFontString() local fontString = FontString() self.fontStrings[#self.fontStrings + 1] = fontString return fontString end
-		function frame:AttachFrame() local child = AttachedFrame() self.children[#self.children + 1] = child return child end
-		function frame:EnableMouse(enabled) self.mouse = enabled end
+		-- As Compositor.lua: the frame is shown, then SetToDefaults resets it (hidden, mouse off).
+		function frame:AttachFrame()
+			local child = AttachedFrame()
+			child.shown, child.strata = false, "MEDIUM"
+			self.children[#self.children + 1] = child
+			return child
+		end
+		function frame:SetFrameStrata(strata) self.strata = strata end
+		function frame:GetFrameStrata() return self.strata end
+		function frame:SetMouseClickEnabled(enabled) self.mouse = enabled end
+		function frame:SetMouseMotionEnabled(enabled) self.motion = enabled end
+		function frame:EnableMouse(enabled) self.mouse, self.motion = enabled, enabled end
 		function frame:RegisterForClicks(...) self.clicks = { ... } end
 		function frame:SetScript(script, func) self.scripts[script] = func end
 		return frame
@@ -792,6 +820,7 @@ scenarios["match choice"] = function()
 	end
 	TickStats({ "STRENGTH" })
 	local row = AttachedFrame()
+	row.strata = "FULLSCREEN_DIALOG"
 	local width, height = rowInitializers[1](row)
 	local all, any = row.children[1], row.children[2]
 	if #row.children ~= 2 or all.fontStrings[1].text ~= "Match all" or any.fontStrings[1].text ~= "Match any" then
@@ -810,8 +839,13 @@ scenarios["match choice"] = function()
 	if any.points[1].x < all.points[1].x + all.width or width < any.points[1].x + any.width or height ~= 20 then
 		return false, "the choices aren't side by side inside the row"
 	end
-	if not (any.mouse and any.scripts.OnClick and any.scripts.OnEnter and any.scripts.OnLeave) then
-		return false, "Match any can't be clicked or highlighted"
+	for _, button in ipairs(row.children) do
+		if not (button:IsShown() and button.strata == row.strata) then
+			return false, "a choice isn't shown with the menu"
+		end
+		if not (button.mouse and button.motion and button.scripts.OnClick and button.scripts.OnEnter and button.scripts.OnLeave) then
+			return false, "a choice can't be clicked or highlighted"
+		end
 	end
 	any.scripts.OnClick(any, "LeftButton")
 	if StatShopperDB.matchAny ~= true or Tick(all):IsShown() or not Tick(any):IsShown() then
