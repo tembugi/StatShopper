@@ -125,6 +125,19 @@ local events = CreateFrame("Frame")
 local stopped -- true after an error: the filters stay off until /reload
 local Guarded -- runs addon code inside Blizzard's without breaking it (defined below)
 
+-- MEASURING BUILD (remove before release). A search that found nothing although searching
+-- again found items (2026-10-04, and 2026-10-12 with Armor): each search's events are
+-- recorded, and if the list still has no rows TRACE_CHECK seconds after the search was sent,
+-- the record goes to the game's error handler, which writes it to Logs/General.log.
+local TRACE_CHECK = 6
+local TRACE_MAX = 80
+local traceLines, traceStart, traceSearch = {}, 0, 0
+local function Trace(text, ...)
+	if #traceLines < TRACE_MAX then
+		traceLines[#traceLines + 1] = string.format("%.2f ", GetTime() - traceStart) .. string.format(text, ...)
+	end
+end
+
 --------------------------------------------------------------------------------
 -- Filtering the results
 --------------------------------------------------------------------------------
@@ -163,6 +176,9 @@ local function UpdateEmptyList()
 end
 
 local function StopSearch()
+	if search then
+		Trace("STOP search (entries %d, shown %d)", #search.entries, #search.shown)
+	end
 	search = nil
 	readQueue = NewQueue()
 	itemWaits = {}
@@ -361,6 +377,7 @@ local function Ask()
 		return
 	end
 	lastQuery = GetTime()
+	Trace("ASK ending %d (item %d), ready %s", ending, itemKey.itemID, tostring(C_AuctionHouse.IsThrottledMessageSystemReady()))
 	C_AuctionHouse.SendSearchQuery(itemKey, QUERY_SORTS, false)
 end
 
@@ -397,6 +414,11 @@ local function Redraw()
 	resultsFrame.browseResults = shown
 	resultsFrame.ItemList:RefreshScrollFrame()
 	UpdateEmptyList()
+	local read = 0
+	for _, entry in ipairs(search.entries) do
+		if entry.stats then read = read + 1 end
+	end
+	Trace("SHOW %d (entries %d, read %d, full %s)", #shown, #search.entries, read, tostring(C_AuctionHouse.HasFullBrowseResults()))
 end
 
 local function OwnsList()
@@ -428,6 +450,7 @@ local function RequestNextPage()
 		worker:Show()
 	elseif C_AuctionHouse.IsThrottledMessageSystemReady() then
 		events:UnregisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+		Trace("MORE pages")
 		C_AuctionHouse.RequestMoreBrowseResults()
 	else
 		events:RegisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
@@ -529,6 +552,24 @@ local function OnItemKeyInfo(itemID)
 	end
 end
 
+-- MEASURING BUILD: the auction house's own events, for the trace.
+local traceEvents = CreateFrame("Frame")
+for _, event in ipairs({ "AUCTION_HOUSE_THROTTLED_MESSAGE_SENT", "AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED", "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED",
+	"AUCTION_HOUSE_THROTTLED_MESSAGE_RESPONSE_RECEIVED", "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED",
+	"AUCTION_HOUSE_BROWSE_RESULTS_ADDED", "AUCTION_HOUSE_BROWSE_FAILURE", "ITEM_SEARCH_RESULTS_UPDATED", "ITEM_SEARCH_RESULTS_ADDED" }) do
+	traceEvents:RegisterEvent(event)
+end
+traceEvents:SetScript("OnEvent", function(_, event, ...)
+	local short = event:gsub("^AUCTION_HOUSE_", "")
+	if event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
+		Trace("event %s %d", short, #(... or {}))
+	elseif event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
+		Trace("event %s (full %s)", short, tostring(C_AuctionHouse.HasFullBrowseResults()))
+	else
+		Trace("event %s", short)
+	end
+end)
+
 events:SetScript("OnEvent", function(_, event, ...)
 	if event == "ITEM_DATA_LOAD_RESULT" then
 		Guarded(OnItemData, ...)
@@ -543,6 +584,8 @@ end)
 -- re-sorted or updated results (added is nil: an item's auctions arriving also update its row),
 -- or appends a further page to them (added).
 local function OnResults(added)
+	Trace("RESULTS %s (Blizzard's list %d, owned %s, search %s, ticks %s)", added and ("added " .. #added) or "updated",
+		resultsFrame:GetNumBrowseResults(), tostring(search ~= nil and resultsFrame.browseResults == search.shown), tostring(search ~= nil), tostring(searchStats ~= nil))
 	if added then
 		-- Blizzard appended the page to the list on screen. Go on only if that list is the one
 		-- the addon handed over.
@@ -581,6 +624,23 @@ local function OnSearchSent()
 	searchStats = ns.Ticked(StatShopperDB.stats)
 	searchMatchAny = StatShopperDB.matchAny
 	StopSearch()
+	traceLines, traceStart, traceSearch = {}, GetTime(), traceSearch + 1
+	local ticked = 0
+	for _ in pairs(searchStats or {}) do ticked = ticked + 1 end
+	Trace("SEARCH %d sent: %d ticked, any %s, ready %s, full %s, asking %s", traceSearch, ticked, tostring(searchMatchAny),
+		tostring(C_AuctionHouse.IsThrottledMessageSystemReady()), tostring(C_AuctionHouse.HasFullBrowseResults()), tostring(asking ~= nil))
+	local thisSearch = traceSearch
+	C_Timer.After(TRACE_CHECK, function()
+		if thisSearch ~= traceSearch or not resultsFrame or resultsFrame:GetNumBrowseResults() > 0 then
+			return
+		end
+		local list = resultsFrame.ItemList
+		Trace("CHECK: no rows; text %s \"%s\", spinner %s, full %s, Blizzard's results %d, search %s, working %s", tostring(list.ResultsText:IsShown()),
+			tostring(list.ResultsText:GetText()), tostring(list.LoadingSpinner:IsShown()), tostring(C_AuctionHouse.HasFullBrowseResults()),
+			#C_AuctionHouse.GetBrowseResults(), tostring(search ~= nil), tostring(IsWorking()))
+		print(NORMAL_FONT_COLOR:WrapTextInColorCode(ADDON_TITLE) .. ": search " .. thisSearch .. " has no rows. Its record went to the game's log.")
+		CallErrorHandler("Stat Shopper trace, search " .. thisSearch .. ": " .. table.concat(traceLines, " | "))
+	end)
 end
 
 -- The favorites list was asked for (the star button, or the auction house opening with

@@ -36,6 +36,8 @@ AUCTION_HOUSE_DEFAULT_FILTERS = {}
 TextureKitConstants = { UseAtlasSize = true, IgnoreAtlasSize = false }
 SOUNDKIT = { IG_MAINMENU_OPTION_CHECKBOX_ON = 856 }
 function PlaySound() end
+-- MEASURING BUILD: the trace's check after a search never runs here.
+C_Timer = { After = function() end }
 -- A game function wowlua_ls doesn't know.
 ---@diagnostic disable-next-line: create-global
 function SetPropagateMouseMotionDelegate(frame, propagate) frame.propagateMotion = propagate end
