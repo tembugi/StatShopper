@@ -36,6 +36,8 @@ AUCTION_HOUSE_DEFAULT_FILTERS = {}
 TextureKitConstants = { UseAtlasSize = true, IgnoreAtlasSize = false }
 SOUNDKIT = { IG_MAINMENU_OPTION_CHECKBOX_ON = 856 }
 function PlaySound() end
+-- A game function wowlua_ls doesn't know.
+---@diagnostic disable-next-line: create-global
 function SetPropagateMouseMotionDelegate(frame, propagate) frame.propagateMotion = propagate end
 -- Copied from Blizzard_Menu/MenuTemplates.lua (forever).
 MenuTemplates = {}
