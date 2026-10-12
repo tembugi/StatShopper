@@ -739,24 +739,27 @@ local function IsTicked(key)
 	return StatShopperDB.stats[key] == true
 end
 
-local function AnyTicked()
-	return next(StatShopperDB.stats) ~= nil
+-- True while the addon's filters differ from their defaults: a stat is ticked, or Match any is
+-- chosen.
+local function IsChanged()
+	return next(StatShopperDB.stats) ~= nil or StatShopperDB.matchAny
 end
 
 -- Blizzard shows the red X on the Filter button while its filters differ from the defaults,
--- and clicking it puts them back. Ticked stats are filters too: the X also shows while any is
--- ticked, and clicking it unticks them.
-local function ShowClearButtonIfTicked()
-	if AnyTicked() then
+-- and clicking it puts them back. The addon's are filters too: the X also shows while a stat is
+-- ticked or Match any is chosen, and clicking it unticks the stats and goes back to Match all.
+local function ShowClearButtonIfChanged()
+	if IsChanged() then
 		filterButton.ClearFiltersButton:Show()
 	end
 end
 
--- After a tick changes. With no stat ticked, the X follows Blizzard's own rule
--- (AuctionHouseSearchBarMixin:UpdateClearFiltersButton), read through the Filter button:
--- calling that method from here would write Blizzard's saved filters from addon code.
+-- After a tick or the Match choice changes. With the addon's filters at their defaults, the X
+-- follows Blizzard's own rule (AuctionHouseSearchBarMixin:UpdateClearFiltersButton), read
+-- through the Filter button: calling that method from here would write Blizzard's saved filters
+-- from addon code.
 local function UpdateClearButton()
-	if AnyTicked() then
+	if IsChanged() then
 		filterButton.ClearFiltersButton:Show()
 		return
 	end
@@ -851,6 +854,7 @@ local function AddMatchChoices(frame)
 			Guarded(function()
 				StatShopperDB.matchAny = choice.matchAny
 				ShowTicks()
+				UpdateClearButton()
 				PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
 			end)
 		end)
@@ -938,10 +942,10 @@ local function Install()
 		Guarded(UntickAll)
 	end)
 	hooksecurefunc(searchBar, "UpdateClearFiltersButton", function()
-		Guarded(ShowClearButtonIfTicked)
+		Guarded(ShowClearButtonIfChanged)
 	end)
 	searchBar:HookScript("OnShow", function()
-		Guarded(ShowClearButtonIfTicked)
+		Guarded(ShowClearButtonIfChanged)
 	end)
 	Menu.ModifyMenu(FILTER_MENU_TAG, function(_, root)
 		Guarded(AddStatsMenu, root)

@@ -15,7 +15,7 @@ The name is "Stat Shopper" (the user's choice, 2026-10-04; "Find My Stats" until
 - Hit, Critical Strike and Haste count for melee and spells alike in Forever, so they are in Attack and in Spell: one key, ticked in both. "Attack" (not "Melee") because the group holds ranged stats too.
 - No Spell Power entry: Spell Power gear ("Increases damage and healing done by magical spells and effects", Staff of Jordan, checked in game) counts for Spell Damage and for Spell Healing; ticking both finds only gear that raises both. Healer gear also carries a little spell damage ("of the Physician" adds healing and a little damage), so it counts for both too.
 - A resistance has two names in the stat table (`RESISTANCE2_NAME` and `ITEM_MOD_FIRE_RESISTANCE_SHORT`, always together); only the first has a game string, so it is the label.
-- The red X on the Filter button shows while any stat is ticked, as it does for Blizzard's own filters, and clicking it unticks them too and goes back to Match all.
+- The red X on the Filter button shows while any stat is ticked or Match any is chosen (also with nothing ticked: the user found it missing, 2026-10-13), as it does while Blizzard's own filters differ from their defaults, and clicking it unticks the stats and goes back to Match all.
 - Nothing else on screen and no chat lines in normal use.
 
 ## Filtering (agreed with the user)

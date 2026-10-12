@@ -393,8 +393,11 @@ resultsEvents:SetScript("OnEvent", function(_, event, added)
 	end
 end)
 
+-- The red X starts hidden, and Blizzard's Reset (its click) hides it again
+-- (AuctionHouseFilterButtonMixin:Reset).
 local filterButton = { ClearFiltersButton = CreateFrame() }
-function filterButton:Reset() end
+filterButton.ClearFiltersButton:Hide()
+function filterButton:Reset() self.ClearFiltersButton:Hide() end
 function filterButton:GetFilters() return {} end
 function filterButton:GetLevelRange() return 0, 0 end
 local searchBar = CreateFrame()
@@ -777,8 +780,8 @@ end
 
 -- The row under the title: Match all and Match any side by side, built from what Blizzard's menu
 -- attaches (Compositor.lua: frames, textures and text; CreateTexture and CreateFontString are
--- disallowed on attached frames, SetFont on attached text). A click moves the tick, and the red X
--- goes back to Match all.
+-- disallowed on attached frames, SetFont on attached text). A click moves the tick. The red X
+-- shows while Match any is chosen, also with nothing ticked, and goes back to Match all.
 scenarios["match choice"] = function()
 	local function Region()
 		local region = { points = {}, shown = true, width = 1, height = 1 }
@@ -859,7 +862,7 @@ scenarios["match choice"] = function()
 	if #rowInitializers ~= 1 then
 		return false, #rowInitializers .. " rows of the addon's own"
 	end
-	TickStats({ "STRENGTH" })
+	TickStats({})
 	local row = AttachedFrame()
 	row.strata = "FULLSCREEN_DIALOG"
 	local width, height = rowInitializers[1](row)
@@ -888,14 +891,25 @@ scenarios["match choice"] = function()
 			return false, "a choice can't be clicked or highlighted"
 		end
 	end
+	local x = filterButton.ClearFiltersButton
 	any.scripts.OnClick(any, "LeftButton")
 	if StatShopperDB.matchAny ~= true or Tick(all):IsShown() or not Tick(any):IsShown() then
 		return false, "clicking Match any"
 	end
+	if not x:IsShown() then
+		return false, "no red X with Match any chosen and nothing ticked"
+	end
+	all.scripts.OnClick(all, "LeftButton")
+	if StatShopperDB.matchAny ~= false or x:IsShown() then
+		return false, "back to Match all with nothing ticked: the red X stayed"
+	end
 	-- The red X (Blizzard's Reset on the Filter button, hooked).
+	TickStats({ "STRENGTH" })
+	any.scripts.OnClick(any, "LeftButton")
+	x:Show()
 	filterButton:Reset()
-	if StatShopperDB.matchAny ~= false or next(StatShopperDB.stats) then
-		return false, "the red X left Match any or a tick"
+	if StatShopperDB.matchAny ~= false or next(StatShopperDB.stats) or x:IsShown() then
+		return false, "the red X left Match any, a tick or itself"
 	end
 	return true
 end
