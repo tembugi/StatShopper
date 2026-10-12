@@ -34,8 +34,12 @@ local FRAME_BUDGET = 0.004
 -- Items the addon asks the server about at a time. 0.1.0 asked about every item of a search at
 -- once, and the game stalled for seconds.
 local MAX_ITEM_LOADS = 30
--- Seconds between redraws of the list while matches still come in.
+-- Seconds between sorts of the matches while more still come in.
 local REDRAW_INTERVAL = 0.25
+-- Matches further down than this many rows below the last row on screen wait until the player
+-- scrolls toward them: the rule (and number) Blizzard's own list uses to fetch its next page
+-- (BROWSE_SCROLL_OFFSET_REFRESH_THRESHOLD, local to Blizzard_AuctionHouseBrowseResultsFrame.lua).
+local REVEAL_THRESHOLD = 30
 -- An ending the addon hasn't learned is learned from one real auction (see ReadStats): the
 -- server is asked for one row's auctions, as clicking the row would. One request at a time,
 -- QUERY_INTERVAL seconds apart: below the server's limit of 100 a minute.
@@ -77,7 +81,8 @@ local searchMatchAny -- "Match any" was chosen when the last search was sent
 --   byKey     ResultKey -> entry
 --   complete  true once every page of results has arrived
 --   pagePaused  true while the next page waits for the results list to be back on screen
---   shown     the list handed to the results frame
+--   shown     the list handed to the results frame, and shownLength its length then
+--   fresh     the matches as the list should show them, while not handed over yet; else nil
 local search
 
 -- Kept for the session: an item key's stats and name never change.
@@ -115,7 +120,9 @@ local endingQueue = NewQueue() -- endings to learn, in the order the search met 
 local endingWaits = {} -- ending -> { entries = waiting for it, tried = ResultKey -> true, tries }
 local asking -- { ending, itemKey, sentAt } while the server is asked for a row's auctions
 local lastQuery = -math.huge -- GetTime() of the last request; the spacing holds across searches
-local redrawPending, lastRedraw = false, 0
+local matchesChanged, lastSort = false, 0 -- a match came in or changed since the last sort
+local listCheckPending -- the list is to be compared with the matches again (see UpdateList)
+local redrawing -- true while the addon itself has Blizzard's list rebuild its rows
 local spinnerShown -- the addon shows Blizzard's spinner in place of "No results"
 
 local worker = CreateFrame("Frame") -- reads items and redraws, a little each frame
@@ -172,7 +179,7 @@ local function StopSearch()
 	endingQueue = NewQueue()
 	endingWaits = {}
 	asking = nil
-	redrawPending = false
+	matchesChanged, listCheckPending = false, false
 	events:UnregisterAllEvents()
 	worker:Hide()
 	UpdateEmptyList()
@@ -180,7 +187,7 @@ end
 
 local function StartSearch(stats, matchAny)
 	StopSearch()
-	search = { stats = stats, matchAny = matchAny, entries = {}, byKey = {}, complete = false, shown = {} }
+	search = { stats = stats, matchAny = matchAny, entries = {}, byKey = {}, complete = false, shown = {}, shownLength = 0 }
 end
 
 local function Enqueue(entry)
@@ -275,7 +282,7 @@ local function ApplyEnding(ending, adds)
 		entry.own = nil
 		statsCache[entry.key] = entry.stats
 		if IsMatch(entry) then
-			redrawPending = true
+			matchesChanged = true
 		end
 	end
 	worker:Show()
@@ -380,27 +387,106 @@ local function Merge(results)
 				Enqueue(entry)
 			end
 		end
+		if IsMatch(entry) then
+			matchesChanged = true
+		end
 	end
-end
-
--- Hands the results frame the matches, sorted as its headers say, and redraws its list.
-local function Redraw()
-	redrawPending = false
-	lastRedraw = GetTime()
-	local matching = ns.Matching(search.entries, search.stats, search.matchAny)
-	ns.SortEntries(matching, auctionFrame:GetSortsForContext(auctionFrame:GetBrowseSearchContext()), SORT_VALUES)
-	local shown = {}
-	for index, entry in ipairs(matching) do
-		shown[index] = entry.result
-	end
-	search.shown = shown
-	resultsFrame.browseResults = shown
-	resultsFrame.ItemList:RefreshScrollFrame()
-	UpdateEmptyList()
 end
 
 local function OwnsList()
 	return search ~= nil and resultsFrame.browseResults == search.shown
+end
+
+-- Hands the results frame a list and has it rebuild its rows. Every rebuild replaces every row
+-- on screen: Blizzard's RefreshScrollFrame gives its scroll box a new data provider, and the
+-- scroll box then releases all its rows and makes them again (ScrollBoxListView: rows are
+-- "never" recycled when the data provider is replaced). So the addon rebuilds only when the
+-- player would see a change, and never while a row is being clicked (see UpdateList).
+local function HandOver(shown)
+	search.shown = shown
+	search.shownLength = #shown
+	resultsFrame.browseResults = shown
+	redrawing = true
+	resultsFrame.ItemList:RefreshScrollFrame()
+	redrawing = false
+	UpdateEmptyList()
+end
+
+-- True while the player holds a mouse button down on the list's rows: a rebuild then would
+-- release the row being clicked, and the click with it.
+local function IsPressingRow()
+	return IsMouseButtonDown() and resultsFrame.ItemList.ScrollBox:IsMouseOver()
+end
+
+-- True when handing the list `fresh` would change what the player sees: a row on screen would
+-- show another result (or the same with a fresher price), or the list's end is less than
+-- REVEAL_THRESHOLD rows below the last row on screen and more matches are ready. Matches further
+-- down wait until the player scrolls toward them, as Blizzard's own list loads more only then.
+local function ChangesOnScreen(fresh)
+	local list = resultsFrame.ItemList
+	if not list:IsVisible() then
+		return true
+	end
+	local shown = search.shown
+	local scrollBox = list.ScrollBox
+	local last = math.min(scrollBox:GetDataIndexEnd(), #shown)
+	for index = math.max(scrollBox:GetDataIndexBegin(), 1), last do
+		if shown[index] ~= fresh[index] then
+			return true
+		end
+	end
+	return #fresh ~= #shown and (#fresh < #shown or #shown - last < REVEAL_THRESHOLD)
+end
+
+-- Brings the list on screen up to date with the matches, sorted as its headers say, but only
+-- where the player would see a change (ChangesOnScreen), and not while a row is being clicked:
+-- then it tries again each frame until the button is let go. The matches are sorted at most
+-- every REDRAW_INTERVAL while more come in, except the first ones, which show at once in an
+-- empty list. `force` hands them over in any case: Blizzard has just put its own results in the
+-- list (a search's first page), or a column header was clicked.
+local function UpdateList(force)
+	listCheckPending = false
+	if matchesChanged and (force or not IsWorking() or search.shownLength == 0 or GetTime() - lastSort >= REDRAW_INTERVAL) then
+		matchesChanged = false
+		lastSort = GetTime()
+		local matching = ns.Matching(search.entries, search.stats, search.matchAny)
+		ns.SortEntries(matching, auctionFrame:GetSortsForContext(auctionFrame:GetBrowseSearchContext()), SORT_VALUES)
+		local fresh = {}
+		for index, entry in ipairs(matching) do
+			fresh[index] = entry.result
+		end
+		search.fresh = fresh
+	end
+	local fresh = search.fresh
+	if not fresh then
+		return
+	end
+	if not force then
+		if not ChangesOnScreen(fresh) then
+			return
+		end
+		if IsPressingRow() then
+			listCheckPending = true
+			worker:Show()
+			return
+		end
+	end
+	search.fresh = nil
+	HandOver(fresh)
+end
+
+-- Blizzard's list calls this after each rebuild and whenever the player scrolls it
+-- (AuctionHouseItemListMixin:CallRefreshCallback). The rows coming into view are compared with
+-- the matches on the next frame (UpdateList).
+local function OnListScrolled()
+	if not redrawing and OwnsList() then
+		listCheckPending = true
+		worker:Show()
+	end
+end
+
+local function ListRefreshCallback()
+	Guarded(OnListScrolled)
 end
 
 -- Asks for the search's next page of results. Filtering and sorting need every page, so the
@@ -448,7 +534,7 @@ local function IssueLoads()
 end
 
 -- One frame's work: ask about more items and endings, read items until the frame's budget is
--- spent, and redraw when matches came in (at most every REDRAW_INTERVAL while more are coming).
+-- spent, and bring the list up to date when matches came in or the player scrolled.
 local function Work()
 	if not search then
 		worker:Hide()
@@ -466,22 +552,23 @@ local function Work()
 			ReadStats(entry)
 		end
 		if IsMatch(entry) then
-			redrawPending = true
+			matchesChanged = true
 		end
 	end
-	if redrawPending then
+	if matchesChanged or listCheckPending then
 		if not OwnsList() then
 			-- A new search or a closed auction house replaced the list.
-			redrawPending = false
-		elseif not IsWorking() or GetTime() - lastRedraw >= REDRAW_INTERVAL then
-			Redraw()
+			matchesChanged, listCheckPending = false, false
+		else
+			UpdateList(false)
 		end
 	end
-	-- Asleep until an event brings more to do (item data, a page, item key info), but awake
-	-- while endings are to be learned (asking is paced and checked each frame) and while the
-	-- next page waits for the list to be back on screen.
-	if IsEmpty(readQueue) and (IsEmpty(loadQueue) or loadsInFlight >= MAX_ITEM_LOADS) and not redrawPending
-		and not asking and IsEmpty(endingQueue) and not search.pagePaused then
+	-- Asleep until an event brings more to do (item data, a page, item key info, a scroll), but
+	-- awake while endings are to be learned (asking is paced and checked each frame), while the
+	-- next page waits for the list to be back on screen, and while the list waits for a sort or
+	-- for a mouse button to be let go.
+	if IsEmpty(readQueue) and (IsEmpty(loadQueue) or loadsInFlight >= MAX_ITEM_LOADS) and not matchesChanged
+		and not listCheckPending and not asking and IsEmpty(endingQueue) and not search.pagePaused then
 		worker:Hide()
 	end
 	UpdateEmptyList()
@@ -543,12 +630,23 @@ end)
 -- re-sorted or updated results (added is nil: an item's auctions arriving also update its row),
 -- or appends a further page to them (added).
 local function OnResults(added)
+	local list = resultsFrame.ItemList
 	if added then
 		-- Blizzard appended the page to the list on screen. Go on only if that list is the one
 		-- the addon handed over.
 		if not OwnsList() then
 			return
 		end
+		-- Blizzard put the page's raw results at the end of the addon's list (tAppendAll) and
+		-- marked the list for a rebuild on its next frame (DirtyScrollFrame). They come back out
+		-- and the mark goes: the rows on screen are rebuilt only if the page brings a change the
+		-- player would see (UpdateList), as Blizzard's own list stays as it is while the player
+		-- looks at rows above its end.
+		local shown = search.shown
+		for index = #shown, search.shownLength + 1, -1 do
+			shown[index] = nil
+		end
+		list.scrollFrameDirty = false
 		Merge(added)
 	else
 		-- Favorites are never filtered, as Blizzard's own filters don't apply to them.
@@ -563,15 +661,18 @@ local function OnResults(added)
 			StartSearch(searchStats, searchMatchAny)
 		end
 		Merge(resultsFrame.browseResults)
+		-- Blizzard's own results are on screen now: the matches go back in their place.
+		matchesChanged = true
 	end
 	-- Blizzard's list asks for the next page by itself whenever fewer than 30 rows are left
 	-- below the last one on screen (BROWSE_SCROLL_OFFSET_REFRESH_THRESHOLD), on every redraw and
 	-- scroll, without waiting for the throttle. A filtered list is short, so it would ask on
 	-- every redraw on top of the addon's paced requests, and the extra requests queue up
 	-- (AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED, seen in game). The addon fetches every page
-	-- itself, so its list goes without; Blizzard sets it again with the next search's results.
-	resultsFrame.ItemList:SetRefreshCallback(nil)
-	Redraw()
+	-- itself, so its list calls the addon's own check instead, which shows matches further down
+	-- as the player scrolls toward them; Blizzard sets its own again with the next results.
+	list:SetRefreshCallback(ListRefreshCallback)
+	UpdateList(not added)
 	RequestNextPage()
 end
 
@@ -598,7 +699,8 @@ end
 -- already found are sorted at once; the search's new results merge in when they arrive.
 local function OnSortChanged()
 	if OwnsList() then
-		Redraw()
+		matchesChanged = true
+		UpdateList(true)
 	end
 end
 
@@ -799,6 +901,7 @@ local function FindPieces()
 		and AuctionHouseSearchContext and AuctionHouseSearchContext.AllFavorites
 		and results and results.UpdateBrowseResults and results.Reset and results.SetSortOrder and results.GetNumBrowseResults
 		and list and list.RefreshScrollFrame and list.SetRefreshCallback and list.SetState and list.ResultsText and list.LoadingSpinner
+		and list.ScrollBox and list.ScrollBox.GetDataIndexBegin and list.ScrollBox.GetDataIndexEnd and IsMouseButtonDown
 		and searchBar and searchBar.UpdateClearFiltersButton
 		and filter and filter.Reset and filter.GetFilters and filter.GetLevelRange and filter.ClearFiltersButton
 		and DISABLED_FONT_COLOR and MenuTemplates and MenuTemplates.AttachBasicButton and groupsNamed

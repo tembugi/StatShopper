@@ -141,7 +141,7 @@ end
 --------------------------------------------------------------------------------
 
 local server = { inFlight = nil, queue = {}, LATENCY = 0.3, QUEUE_SIZE = tonumber(os.getenv("QUEUE_SIZE")) or 3, PAGE = 50 }
-local counts = { sent = 0, queued = 0, dropped = 0, more = 0 }
+local counts = { sent = 0, queued = 0, dropped = 0, more = 0, rebuilds = 0, lostClicks = 0 }
 local client = { results = {}, full = true, query = nil, served = 0, itemSearch = {} }
 local queries = {} -- name -> every result of that search, in the server's order
 local favorites = {}
@@ -271,10 +271,25 @@ local ItemListState = { NoSearch = 1, NoResults = 2, ResultsPending = 3, ShowRes
 local ROWS_ON_SCREEN = 10
 local BROWSE_SCROLL_OFFSET_REFRESH_THRESHOLD = 30
 
-local list = { ResultsText = CreateFrame(), LoadingSpinner = CreateFrame(), isInitialized = true, scroll = 1 }
+-- The player's mouse: a button held down, and over the list's rows or not. A press on a row is a
+-- click once let go, unless the rows were rebuilt meanwhile. ASSUMED: a rebuild while the button
+-- is held loses the click, as it releases the row being pressed and makes it again (the cause
+-- suspected of a first click that didn't open an item, 2026-10-13; not measured in game).
+local mouse = { down = false, overRows = false, pressOnRows = false }
+function IsMouseButtonDown() return mouse.down end
+
+-- The rows on screen: the scroll box shows ROWS_ON_SCREEN rows from `scroll`, out of the data it
+-- was given at its last rebuild (`dataSize`); an empty list has none (SetState removes its data
+-- provider).
+local scrollBox = {}
+local list = { ResultsText = CreateFrame(), LoadingSpinner = CreateFrame(), isInitialized = true, scroll = 1, dataSize = 0, ScrollBox = scrollBox }
+function scrollBox:GetDataIndexBegin() return list.dataSize > 0 and list.scroll or 0 end
+function scrollBox:GetDataIndexEnd() return list.dataSize > 0 and math.min(list.scroll + ROWS_ON_SCREEN - 1, list.dataSize) or 0 end
+function scrollBox:IsMouseOver() return mouse.overRows end
 list.LoadingSpinner:Hide()
 local results = { ItemList = list, browseResults = {}, searchStarted = false, shown = true }
 function list:IsShown() return results.shown end
+function list:IsVisible() return results.shown end
 function list:SetRefreshCallback(callback) self.refreshCallback = callback end
 function list:SetState(state)
 	if self.state == state then
@@ -286,11 +301,14 @@ function list:SetState(state)
 	if state == ItemListState.ResultsPending then
 		self.LoadingSpinner:Show()
 	end
+	if state ~= ItemListState.ShowResults then
+		self.dataSize = 0 -- self.ScrollBox:RemoveDataProvider()
+	end
 end
 function list:DirtyScrollFrame() self.scrollFrameDirty = true end
 function list:CallRefreshCallback()
 	if self.refreshCallback ~= nil then
-		local lastDisplayedEntry = math.min(self.scroll + ROWS_ON_SCREEN - 1, #results.browseResults)
+		local lastDisplayedEntry = self.ScrollBox:GetDataIndexEnd()
 		self.refreshCallback(lastDisplayedEntry)
 	end
 end
@@ -308,7 +326,20 @@ function list:RefreshScrollFrame()
 		return
 	end
 	self:SetState(ItemListState.ShowResults)
+	-- self.ScrollBox:SetDataProvider(CreateIndexRangeDataProvider(numResults), RetainScrollPosition):
+	-- every row on screen is released and made again.
+	self.dataSize = #results.browseResults
+	self.scroll = math.max(1, math.min(self.scroll, self.dataSize))
+	counts.rebuilds = counts.rebuilds + 1
+	if mouse.down and mouse.pressOnRows then
+		counts.lostClicks = counts.lostClicks + 1
+	end
 	self:CallRefreshCallback()
+end
+-- The player scrolls: the first row on screen becomes `row` (OnScrollBoxScroll).
+local function ScrollTo(row)
+	list.scroll = math.max(1, math.min(row, list.dataSize))
+	list:CallRefreshCallback()
 end
 function list:Reset()
 	self.scroll = 1
@@ -459,6 +490,14 @@ local function Tick()
 	if list.scrollFrameDirty then
 		list:RefreshScrollFrame()
 	end
+end
+
+-- The player presses the mouse button on the list (on a row, if there are rows), or lets it go.
+local function Press()
+	mouse.down, mouse.overRows, mouse.pressOnRows = true, true, list.dataSize > 0
+end
+local function Release()
+	mouse.down, mouse.pressOnRows = false, false
 end
 
 -- What the player sees: "rows", "spinner", "no results" or "blank".
@@ -857,6 +896,82 @@ scenarios["match choice"] = function()
 	filterButton:Reset()
 	if StatShopperDB.matchAny ~= false or next(StatShopperDB.stats) then
 		return false, "the red X left Match any or a tick"
+	end
+	return true
+end
+
+-- While the player looks at the top of a long list, the rows on screen are never rebuilt: the
+-- pages that arrive add matches far below, which show as the player scrolls toward them, like
+-- the pages Blizzard's own list loads. ASSUMED for this scenario: the server sends the results
+-- in the order of the search's sort (Price), as Blizzard's list, which never sorts, expects.
+-- The ending is learned already (once per account and game build): the answer to an item search
+-- can make Blizzard's list start over by itself (see Answer), which the addon doesn't control.
+local function LearnEnding()
+	StatShopperAccountDB.endings[500] = { ITEM_MOD_STRENGTH_SHORT = true }
+end
+
+scenarios["list stays still"] = function()
+	MakeItems()
+	LearnEnding()
+	local sorted = {}
+	for _, result in ipairs(queries.everything) do sorted[#sorted + 1] = result end
+	table.sort(sorted, function(a, b) return a.minPrice < b.minPrice end)
+	queries.sorted = sorted
+	TickStats({ "SPIRIT" })
+	AuctionHouseFrame:SendBrowseQuery("sorted")
+	Run(1)
+	if #results.browseResults < ROWS_ON_SCREEN then
+		return false, "first page: " .. #results.browseResults .. " rows"
+	end
+	local top = {}
+	for row = 1, ROWS_ON_SCREEN do top[row] = results.browseResults[row] end
+	local before = counts.rebuilds
+	Run(15)
+	if counts.rebuilds ~= before then
+		return false, (counts.rebuilds - before) .. " rebuilds while the player looked at the top"
+	end
+	if counts.more ~= 4 then
+		return false, counts.more .. " requests for more pages, 4 needed"
+	end
+	-- Scrolling toward the end shows the rest, and the rows above don't move.
+	ScrollTo(list.dataSize - ROWS_ON_SCREEN + 1)
+	Run(0.5)
+	local spirit = 0
+	for _, item in pairs(items) do
+		if item.stats.ITEM_MOD_SPIRIT_SHORT then spirit = spirit + 1 end
+	end
+	if #results.browseResults ~= spirit then
+		return false, string.format("after scrolling down: %d of %d matches", #results.browseResults, spirit)
+	end
+	for row = 1, ROWS_ON_SCREEN do
+		if results.browseResults[row] ~= top[row] then
+			return false, "row " .. row .. " moved"
+		end
+	end
+	return true
+end
+
+-- A click on a row is never lost: while the player holds the button on a row, the rows aren't
+-- rebuilt; the list catches up once the button is let go. The player clicks again and again
+-- while a short list fills in. The ending is learned already, as in "list stays still".
+scenarios["clicks are never lost"] = function()
+	MakeItems(3)
+	LearnEnding()
+	TickStats({ "INTELLECT" })
+	AuctionHouseFrame:SendBrowseQuery("everything")
+	Run(0.5)
+	for _ = 1, 50 do
+		Press()
+		Run(0.15)
+		Release()
+		Run(0.15)
+	end
+	Run(5)
+	if counts.lostClicks > 0 then
+		return false, counts.lostClicks .. " clicks lost to a rebuild"
+	end
+	if Shown() ~= "item2,item4,item9*" then
+		return false, "shown: " .. Shown()
 	end
 	return true
 end
