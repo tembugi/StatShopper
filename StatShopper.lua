@@ -127,9 +127,11 @@ local Guarded -- runs addon code inside Blizzard's without breaking it (defined 
 
 -- MEASURING BUILD (remove before release). A search that found nothing although searching
 -- again found items (2026-10-04, and 2026-10-12 with Armor): each search's events are
--- recorded, and if Blizzard's list shows "No results" for a search with stats ticked (checked
--- every TRACE_CHECK seconds for TRACE_FOR seconds), the record goes to the game's error
--- handler, which shows it and writes it to Logs/General.log.
+-- recorded. If Blizzard's list shows "No items found" for a search with stats ticked (checked
+-- every TRACE_CHECK seconds for TRACE_FOR seconds), and the search was Match any or looks
+-- unfinished (pages or reads missing, or the list isn't the addon's), the record goes to the
+-- game's error handler, which shows it. A finished Match all search that found nothing is
+-- normal (a stat no item has) and makes no record.
 local TRACE_CHECK = 0.5
 local TRACE_FOR = 120
 local TRACE_MAX = 300
@@ -649,6 +651,15 @@ local function OnSearchSent()
 			return
 		end
 		ticker:Cancel()
+		local read = 0
+		for _, entry in ipairs(search and search.entries or {}) do
+			if entry.stats then read = read + 1 end
+		end
+		local finished = search ~= nil and search.complete and not IsWorking() and read == #search.entries
+			and resultsFrame.browseResults == search.shown
+		if finished and not searchMatchAny then
+			return
+		end
 		Trace("CHECK: \"No results\"; spinner %s, full %s, Blizzard's results %d, search %s, working %s, owned %s, display Buy %s",
 			tostring(list.LoadingSpinner:IsShown()), tostring(C_AuctionHouse.HasFullBrowseResults()), #C_AuctionHouse.GetBrowseResults(),
 			tostring(search ~= nil), tostring(IsWorking()), tostring(search ~= nil and resultsFrame.browseResults == search.shown), tostring(IsListShowing()))
