@@ -4,11 +4,14 @@
 -- Exits non-zero when the scenario fails.
 --
 -- Blizzard's code below copies wow-ui-source (forever, 1.60.1): Shared/Blizzard_AuctionHouseFrame,
--- Blizzard_AuctionHouseBrowseResultsFrame and Blizzard_AuctionHouseItemList, cut to what the
--- addon touches. The server is a model; what it assumes beyond the game's code is marked
--- ASSUMED: a stand-in that behaves better than the game hides bugs.
+-- Blizzard_AuctionHouseBrowseResultsFrame and Blizzard_AuctionHouseItemList, and Blizzard_Menu's
+-- Menu.lua, Compositor.lua, MenuTemplates.lua and MenuVariants.lua, cut to what the addon
+-- touches. The widgets have only the methods Forever's widgets have (Tests/WidgetAPI.lua). The
+-- server is a model; what the stand-in assumes beyond the game's code is marked ASSUMED: a
+-- stand-in that behaves better than the game hides bugs.
 
--- This file runs under luajit, outside the game, and uses standard Lua's loadfile, os and io.
+-- This file runs under luajit, outside the game, and uses standard Lua's dofile, loadfile, os
+-- and io. It plays the game, so it sets the game's globals.
 ---@diagnostic disable: undefined-global, lowercase-global
 
 local scenario = arg[1]
@@ -36,26 +39,6 @@ AUCTION_HOUSE_DEFAULT_FILTERS = {}
 TextureKitConstants = { UseAtlasSize = true, IgnoreAtlasSize = false }
 SOUNDKIT = { IG_MAINMENU_OPTION_CHECKBOX_ON = 856 }
 function PlaySound() end
--- A game function wowlua_ls doesn't know.
----@diagnostic disable-next-line: create-global
-function SetPropagateMouseMotionDelegate(frame, propagate) frame.propagateMotion = propagate end
--- Copied from Blizzard_Menu/MenuTemplates.lua (forever).
-MenuTemplates = {}
-function MenuTemplates.AttachBasicButton(parent, width, height)
-	local button = parent:AttachFrame("Button")
-	button:SetFrameStrata(parent:GetFrameStrata()) -- Machinery is broken.
-
-	-- SetToDefaults wipes button state, desired states must be explicitly set now.
-	button:Show()
-
-	SetPropagateMouseMotionDelegate(button, true)
-
-	button:SetMouseClickEnabled(true)
-	button:SetMouseMotionEnabled(true)
-	button:SetSize(width or 16, height or 16)
-
-	return button
-end
 AuctionHouseSearchContext = { BrowseAll = 1, AllFavorites = 2, BuyItems = 3, AllBids = 4 }
 local chat = {}
 local realPrint = print
@@ -76,34 +59,326 @@ function hooksecurefunc(owner, name, hook)
 	end
 end
 
-local frames = {}
-function CreateFrame()
-	local frame = { shown = true, events = {}, scripts = {} }
-	function frame:Show() self.shown = true end
-	function frame:Hide() self.shown = false end
-	function frame:IsShown() return self.shown end
-	function frame:SetShown(shown) self.shown = not not shown end
-	function frame:SetScript(script, func) self.scripts[script] = func end
-	function frame:HookScript(script, func)
-		local old = self.scripts[script]
-		self.scripts[script] = function(...) if old then old(...) end func(...) end
+EventUtil = { ContinueOnAddOnLoaded = function(_, func) func() end }
+
+--------------------------------------------------------------------------------
+-- Widgets. A widget has only the methods its type has in Forever (Tests/WidgetAPI.lua): any
+-- other is nil, and calling it is an error, as in the game. The ones below do what the game does
+-- with what the scenarios look at; any other method only records its last arguments in
+-- widget.calls. Blizzard's frames are widgets with their mixins' methods as fields.
+--------------------------------------------------------------------------------
+
+local WIDGET_METHODS = {}
+for widgetType, names in pairs(dofile("Tests/WidgetAPI.lua")) do
+	local set = {}
+	for _, name in ipairs(names) do
+		set[name] = true
 	end
-	function frame:RegisterEvent(event) self.events[event] = true end
-	function frame:UnregisterEvent(event) self.events[event] = nil end
-	function frame:UnregisterAllEvents() self.events = {} end
-	frames[#frames + 1] = frame
-	return frame
+	WIDGET_METHODS[widgetType] = set
+end
+
+local widgets = {} -- every widget, in the order made
+-- The player's mouse: a button held down, and the widget it is over (see Playing).
+local mouse = { down = false, over = nil, pressOnRows = false }
+
+local Widget = {}
+local recorders = {}
+
+local function Recorder(name)
+	local recorder = recorders[name]
+	if not recorder then
+		recorder = function(self, ...)
+			self.calls[name] = { ... }
+		end
+		recorders[name] = recorder
+	end
+	return recorder
+end
+
+-- Blizzard's menu refuses some methods on what it makes (`refused`, see Blizzard's menu below):
+-- as Compositor.lua's ConfigureMetatable, asking for one reports an error through the error
+-- handler, and calling it reports another, without stopping the code (assertsafe).
+local function Refused(name)
+	CallErrorHandler(string.format("Use of function '%s' is disallowed. (Index)", name))
+	return function()
+		CallErrorHandler(string.format("Use of function '%s' is disallowed (Call).", name))
+	end
+end
+
+local WidgetMeta = {
+	__index = function(widget, key)
+		local refused = rawget(widget, "refused")
+		if refused and refused[key] then
+			return Refused(key)
+		end
+		if WIDGET_METHODS[rawget(widget, "widgetType")][key] then
+			return Widget[key] or Recorder(key)
+		end
+		return nil
+	end,
+}
+
+local function NewWidget(widgetType, parent)
+	assert(WIDGET_METHODS[widgetType], "no such widget type: " .. tostring(widgetType))
+	local widget = setmetatable({
+		widgetType = widgetType,
+		parent = parent,
+		children = {},
+		shown = true,
+		width = 0,
+		height = 0,
+		points = {},
+		scripts = {},
+		events = {},
+		calls = {},
+	}, WidgetMeta)
+	if parent then
+		parent.children[#parent.children + 1] = widget
+	end
+	widgets[#widgets + 1] = widget
+	return widget
+end
+
+function CreateFrame(frameType, _, parent)
+	return NewWidget(frameType, parent)
+end
+
+function Widget:GetObjectType()
+	return self.widgetType
+end
+function Widget:GetParent()
+	return self.parent
+end
+function Widget:SetParent(parent)
+	if parent == self.parent then
+		return
+	end
+	if self.parent then
+		local siblings = self.parent.children
+		for index = #siblings, 1, -1 do
+			if siblings[index] == self then
+				table.remove(siblings, index)
+			end
+		end
+	end
+	self.parent = parent
+	if parent then
+		parent.children[#parent.children + 1] = self
+	end
+end
+
+-- Shown and visible. OnShow and OnHide run for a widget and its shown children when it becomes
+-- visible or stops being visible.
+function Widget:IsShown()
+	return self.shown
+end
+function Widget:IsVisible()
+	return self.shown and (self.parent == nil or self.parent:IsVisible())
+end
+local function RunVisibilityScripts(widget, name)
+	local script = widget.scripts[name]
+	if script then
+		script(widget)
+	end
+	for _, child in ipairs(widget.children) do
+		if child.shown then
+			RunVisibilityScripts(child, name)
+		end
+	end
+end
+function Widget:SetShown(shown)
+	shown = not not shown
+	if shown == self.shown then
+		return
+	end
+	local parentVisible = self.parent == nil or self.parent:IsVisible()
+	self.shown = shown
+	if parentVisible then
+		RunVisibilityScripts(self, shown and "OnShow" or "OnHide")
+	end
+end
+function Widget:Show()
+	self:SetShown(true)
+end
+function Widget:Hide()
+	self:SetShown(false)
+end
+
+function Widget:SetScript(name, func)
+	self.scripts[name] = func
+end
+function Widget:GetScript(name)
+	return self.scripts[name]
+end
+function Widget:HookScript(name, func)
+	local old = self.scripts[name]
+	self.scripts[name] = old and function(...)
+		old(...)
+		func(...)
+	end or func
+end
+
+-- Events reach every frame registered for them, shown or not, in the order the frames were made.
+function Widget:RegisterEvent(event)
+	self.events[event] = true
+end
+function Widget:UnregisterEvent(event)
+	self.events[event] = nil
+end
+function Widget:UnregisterAllEvents()
+	self.events = {}
+end
+function Widget:IsEventRegistered(event)
+	return self.events[event] == true
 end
 local function FireEvent(event, ...)
-	for _, frame in ipairs(frames) do
-		if frame.events[event] and frame.scripts.OnEvent then
-			frame.scripts.OnEvent(frame, event, ...)
+	for _, widget in ipairs(widgets) do
+		local onEvent = widget.scripts.OnEvent
+		if widget.events[event] and onEvent then
+			onEvent(widget, event, ...)
 		end
 	end
 end
 
-Menu = { ModifyMenu = function(_, func) Menu.modify = func end }
-EventUtil = { ContinueOnAddOnLoaded = function(_, func) func() end }
+-- Anchors: kept as given. A point set again replaces its earlier anchor, as in the game.
+function Widget:SetPoint(point, a, b, c, d)
+	local relativeTo, relativePoint, x, y = self.parent, point, 0, 0
+	if type(a) == "number" then
+		x, y = a, b or 0
+	elseif a ~= nil then
+		relativeTo = a
+		if type(b) == "string" then
+			relativePoint, x, y = b, c or 0, d or 0
+		elseif type(b) == "number" then
+			x, y = b, c or 0
+		end
+	end
+	local anchor = { point = point, relativeTo = relativeTo, relativePoint = relativePoint, x = x, y = y }
+	for index, old in ipairs(self.points) do
+		if old.point == point then
+			self.points[index] = anchor
+			return
+		end
+	end
+	self.points[#self.points + 1] = anchor
+end
+function Widget:SetAllPoints(relativeTo)
+	self:SetPoint("TOPLEFT", relativeTo or self.parent, "TOPLEFT")
+	self:SetPoint("BOTTOMRIGHT", relativeTo or self.parent, "BOTTOMRIGHT")
+end
+function Widget:ClearAllPoints()
+	self.points = {}
+end
+-- ASSUMED: the stand-in does no layout; a widget is the size it was last given.
+function Widget:SetSize(width, height)
+	self.width, self.height = width, height
+end
+function Widget:SetWidth(width)
+	self.width = width
+end
+function Widget:SetHeight(height)
+	self.height = height
+end
+function Widget:GetWidth()
+	return self.width
+end
+function Widget:GetHeight()
+	return self.height
+end
+function Widget:GetSize()
+	return self.width, self.height
+end
+-- A frame without a strata of its own is on its parent's.
+function Widget:SetFrameStrata(strata)
+	self.strata = strata
+end
+function Widget:GetFrameStrata()
+	return self.strata or (self.parent and self.parent:GetFrameStrata()) or "MEDIUM"
+end
+
+-- The mouse.
+function Widget:SetMouseClickEnabled(enabled)
+	self.mouseClick = enabled
+end
+function Widget:SetMouseMotionEnabled(enabled)
+	self.mouseMotion = enabled
+end
+function Widget:EnableMouse(enabled)
+	self.mouseClick, self.mouseMotion = enabled, enabled
+end
+function Widget:IsMouseClickEnabled()
+	return self.mouseClick == true
+end
+function Widget:IsMouseMotionEnabled()
+	return self.mouseMotion == true
+end
+function Widget:RegisterForClicks(...)
+	self.clicks = { ... }
+end
+-- ASSUMED: a widget's children lie inside it, so the mouse over a child is over the widget too.
+function Widget:IsMouseOver()
+	local over = mouse.over
+	while over do
+		if over == self then
+			return true
+		end
+		over = over.parent
+	end
+	return false
+end
+
+-- Text. ASSUMED: a glyph is 6 wide in every font; the scenarios only compare widths.
+function Widget:SetText(text)
+	self.text = text
+end
+function Widget:GetText()
+	return self.text
+end
+function Widget:GetUnboundedStringWidth()
+	return #(self.text or "") * 6
+end
+function Widget:SetTextToFit(text)
+	self.text = text
+	self.width = self:GetUnboundedStringWidth()
+end
+function Widget:SetFontObject(fontObject)
+	self.fontObject = fontObject
+end
+function Widget:SetTextColor(r, g, b, a)
+	self.color = { r, g, b, a }
+end
+function Widget:SetJustifyH(justify)
+	self.justifyH = justify
+end
+
+-- Textures. ASSUMED: every atlas is 16 by 16; the scenarios only compare positions.
+function Widget:SetAtlas(atlas, useAtlasSize)
+	self.atlas = atlas
+	if useAtlasSize then
+		self.width, self.height = 16, 16
+	end
+end
+function Widget:SetTexture(file)
+	self.file = file
+end
+function Widget:SetDrawLayer(layer, level)
+	self.layer, self.level = layer, level or 0
+end
+function Widget:GetDrawLayer()
+	return self.layer or "ARTWORK", self.level or 0
+end
+
+-- What it resets is in Blizzard's comments (Compositor.lua, MenuTemplates.lua): anchors cleared,
+-- size 0 by 0, scripts removed and a button's state wiped; and, seen in game, hidden (1.2.0's
+-- first build attached buttons without showing them again, and the row stayed empty). ASSUMED:
+-- the mouse off, the strata MEDIUM, and no text or art.
+function Widget:SetToDefaults()
+	self.points, self.width, self.height, self.scripts = {}, 0, 0, {}
+	self.shown = false
+	self.mouseClick, self.mouseMotion, self.clicks = false, false, nil
+	self.strata = "MEDIUM"
+	self.text, self.atlas, self.file = nil, nil, nil
+end
 
 --------------------------------------------------------------------------------
 -- Items
@@ -264,32 +539,49 @@ function C_AuctionHouse.GetItemSearchResultInfo(itemKey, index)
 end
 
 --------------------------------------------------------------------------------
--- Blizzard's results list (Blizzard_AuctionHouseItemList, BrowseResultsFrame)
+-- Blizzard's auction house frames: Blizzard_AuctionHouseFrame.xml, its SearchBar (with the
+-- Filter button, a DropdownButton: an intrinsic Button, Blizzard_Menu/DropdownButton.xml), and
+-- the results list (BrowseResultsFrame, its ItemList: Mainline/Blizzard_AuctionHouseItemList.xml).
+-- The auction house is open on its results list.
 --------------------------------------------------------------------------------
 
 local ItemListState = { NoSearch = 1, NoResults = 2, ResultsPending = 3, ShowResults = 4 }
 local ROWS_ON_SCREEN = 10
 local BROWSE_SCROLL_OFFSET_REFRESH_THRESHOLD = 30
 
--- The player's mouse: a button held down, and over the list's rows or not. A press on a row is a
--- click once let go, unless the rows were rebuilt meanwhile. ASSUMED: a rebuild while the button
--- is held loses the click, as it releases the row being pressed and makes it again (the cause
--- suspected of a first click that didn't open an item, 2026-10-13; not measured in game).
-local mouse = { down = false, overRows = false, pressOnRows = false }
+AuctionHouseFrame = NewWidget("Frame")
+local searchBar = NewWidget("Frame", AuctionHouseFrame)
+local filterButton = NewWidget("Button", searchBar)
+filterButton.ClearFiltersButton = NewWidget("Button", filterButton)
+local results = NewWidget("Frame", AuctionHouseFrame)
+local list = NewWidget("Frame", results)
+local scrollBox = NewWidget("Frame", list)
+list.ScrollBox = scrollBox
+list.ResultsText = NewWidget("FontString", list)
+list.LoadingSpinner = NewWidget("Frame", list)
+local itemBuy = NewWidget("Frame", AuctionHouseFrame)
+AuctionHouseFrame.BrowseResultsFrame, AuctionHouseFrame.SearchBar, AuctionHouseFrame.ItemBuyFrame = results, searchBar, itemBuy
+searchBar.FilterButton = filterButton
+results.ItemList = list
+-- Hidden in the XML, and not shown yet.
+list.ResultsText:Hide()
+list.LoadingSpinner:Hide()
+filterButton.ClearFiltersButton:Hide()
+itemBuy:Hide()
+
+-- The player's mouse (`mouse`): a press on a row is a click once let go, unless the rows were
+-- rebuilt meanwhile. ASSUMED: a rebuild while the button is held loses the click, as it releases
+-- the row being pressed and makes it again (the cause suspected of a first click that didn't
+-- open an item, 2026-10-13; not measured in game).
 function IsMouseButtonDown() return mouse.down end
 
 -- The rows on screen: the scroll box shows ROWS_ON_SCREEN rows from `scroll`, out of the data it
 -- was given at its last rebuild (`dataSize`); an empty list has none (SetState removes its data
 -- provider).
-local scrollBox = {}
-local list = { ResultsText = CreateFrame(), LoadingSpinner = CreateFrame(), isInitialized = true, scroll = 1, dataSize = 0, ScrollBox = scrollBox }
+list.isInitialized, list.scroll, list.dataSize = true, 1, 0
 function scrollBox:GetDataIndexBegin() return list.dataSize > 0 and list.scroll or 0 end
 function scrollBox:GetDataIndexEnd() return list.dataSize > 0 and math.min(list.scroll + ROWS_ON_SCREEN - 1, list.dataSize) or 0 end
-function scrollBox:IsMouseOver() return mouse.overRows end
-list.LoadingSpinner:Hide()
-local results = { ItemList = list, browseResults = {}, searchStarted = false, shown = true }
-function list:IsShown() return results.shown end
-function list:IsVisible() return results.shown end
+results.browseResults, results.searchStarted = {}, false
 function list:SetRefreshCallback(callback) self.refreshCallback = callback end
 function list:SetState(state)
 	if self.state == state then
@@ -345,6 +637,15 @@ function list:Reset()
 	self.scroll = 1
 	self:RefreshScrollFrame()
 end
+-- OnShow without Init and the table's layout, which the stand-in leaves out.
+function list:OnShow() self:RefreshScrollFrame() end
+function list:OnUpdate()
+	if self.scrollFrameDirty then
+		self:RefreshScrollFrame()
+	end
+end
+list:SetScript("OnShow", list.OnShow)
+list:SetScript("OnUpdate", list.OnUpdate)
 
 function results:GetNumBrowseResults() return #self.browseResults end
 function results:Reset()
@@ -381,39 +682,49 @@ function results:UpdateBrowseResults(addedBrowseResults)
 	end
 end
 function results:SetSortOrder(sortOrder) AuctionHouseFrame:SetBrowseSortOrder(sortOrder) end
-
-local resultsEvents = CreateFrame()
-resultsEvents:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
-resultsEvents:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
-resultsEvents:SetScript("OnEvent", function(_, event, added)
+-- OnShow without the auction house's callbacks, which the stand-in leaves out.
+function results:OnShow() self.ItemList:RefreshScrollFrame() end
+function results:OnEvent(event, added)
 	if event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
-		results:UpdateBrowseResults()
+		self:UpdateBrowseResults()
 	else
-		results:UpdateBrowseResults(added)
+		self:UpdateBrowseResults(added)
 	end
-end)
+end
+results:SetScript("OnShow", results.OnShow)
+results:SetScript("OnEvent", results.OnEvent)
+-- OnLoad: the browse results can change while the list isn't on screen.
+results:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+results:RegisterEvent("AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
 
 -- The red X starts hidden, and Blizzard's Reset (its click) hides it again
 -- (AuctionHouseFilterButtonMixin:Reset).
-local filterButton = { ClearFiltersButton = CreateFrame() }
-filterButton.ClearFiltersButton:Hide()
 function filterButton:Reset() self.ClearFiltersButton:Hide() end
 function filterButton:GetFilters() return {} end
 function filterButton:GetLevelRange() return 0, 0 end
-local searchBar = CreateFrame()
-searchBar.FilterButton = filterButton
 function searchBar:UpdateClearFiltersButton() end
 
 AuctionHouseFrameDisplayMode = { Buy = { "BrowseResultsFrame" }, ItemBuy = { "ItemBuyFrame" } }
-AuctionHouseFrame = { BrowseResultsFrame = results, SearchBar = searchBar, sorts = {}, activeSearches = {} }
+AuctionHouseFrame.sorts, AuctionHouseFrame.activeSearches = {}, {}
+-- Without the selling and token modes, tabs, dialogs and popups.
 function AuctionHouseFrame:SetDisplayMode(displayMode)
 	if self.displayMode == displayMode then
 		return
 	end
 	self.displayMode = displayMode
-	results.shown = displayMode == AuctionHouseFrameDisplayMode.Buy
-	if results.shown then
-		list:RefreshScrollFrame() -- BrowseResultsFrame:OnShow
+	local subframesToUpdate = {}
+	for _, mode in pairs(AuctionHouseFrameDisplayMode) do
+		for _, subframe in ipairs(mode) do
+			subframesToUpdate[subframe] = subframesToUpdate[subframe] or mode == displayMode
+		end
+	end
+	for subframe, shouldShow in pairs(subframesToUpdate) do
+		if not shouldShow then
+			self[subframe]:Hide()
+		end
+	end
+	for i = 1, #displayMode do
+		self[displayMode[i]]:Show()
 	end
 end
 function AuctionHouseFrame:GetDisplayMode() return self.displayMode end
@@ -463,6 +774,157 @@ end
 AuctionHouseFrame.displayMode = AuctionHouseFrameDisplayMode.Buy
 
 --------------------------------------------------------------------------------
+-- Blizzard's menu (Blizzard_Menu), cut to the rows the addon adds to the Filter menu: when the
+-- menu opens it makes each row's frame and calls the row's initializers on it. A frame the menu
+-- makes refuses the methods that would make regions it doesn't know of, and text attached to it
+-- refuses SetFont (1.0.0 and 1.0.1 called it: an error each time the menu opened).
+--------------------------------------------------------------------------------
+
+Menu = { ModifyMenu = function(_, func) Menu.modify = func end }
+
+-- Compositor.lua: the methods refused on what the menu makes.
+local FRAME_REFUSALS = { SetForbidden = true, CreateTexture = true, CreateMaskTexture = true, CreateFontString = true, CreateAnimationGroup = true, CreateLine = true }
+local FONT_STRING_REFUSALS = { SetFont = true }
+local REGION_REFUSALS = {}
+
+local Compositor = {}
+
+-- ConfigureMetatable: what the menu makes refuses some methods, and a frame can attach
+-- textures, text and frames (frameRedirectFunctions), which the menu releases when it closes.
+local function Configure(region)
+	local objectType = region:GetObjectType()
+	if objectType == "FontString" then
+		region.refused = FONT_STRING_REFUSALS
+	elseif objectType == "Texture" then
+		region.refused = REGION_REFUSALS
+	else
+		region.refused = FRAME_REFUSALS
+		region.AttachTexture = Compositor.AttachTexture
+		region.AttachFontString = Compositor.AttachFontString
+		region.AttachFrame = Compositor.AttachFrame
+	end
+	return region
+end
+
+-- CreateWithPool, with SetTextureToDefaults and SetFontStringToDefaults. ASSUMED: each comes new
+-- from its pool (a reused one is reset the same way first).
+function Compositor.AttachTexture(parent)
+	local texture = NewWidget("Texture", parent)
+	texture:SetToDefaults()
+	texture:SetSize(1, 1)
+	texture:SetDrawLayer("ARTWORK")
+	Configure(texture)
+	texture:Show()
+	return texture
+end
+function Compositor.AttachFontString(parent)
+	local fontString = NewWidget("FontString", parent)
+	fontString:SetToDefaults()
+	fontString:SetSize(1, 1)
+	fontString:SetFontObject("GameFontHighlight")
+	fontString:SetTextColor(1, 1, 1, 1)
+	fontString:SetWidth(150)
+	fontString:SetMaxLines(1)
+	fontString:SetJustifyH("LEFT")
+	fontString:SetJustifyV("MIDDLE")
+	Configure(fontString)
+	fontString:Show()
+	return fontString
+end
+-- AcquireFrame (shown), then Configure with SetFrameToDefaults (hidden again).
+function Compositor.AttachFrame(parent, frameType)
+	local frame = NewWidget(frameType, parent)
+	frame:SetParent(parent)
+	frame:SetFrameStrata(parent:GetFrameStrata())
+	frame:Show()
+	frame:SetToDefaults()
+	frame:SetSize(1, 1)
+	return Configure(frame)
+end
+
+-- MenuTemplates.lua's local delegate. ASSUMED: it calls the frame's own SetPropagateMouseMotion
+-- (CreateSecureDelegate isn't in wow-ui-source).
+local function SetPropagateMouseMotionDelegate(frame, propagate)
+	frame:SetPropagateMouseMotion(propagate)
+end
+
+-- Copied from Blizzard_Menu/MenuTemplates.lua (forever).
+MenuTemplates = {}
+function MenuTemplates.AttachBasicButton(parent, width, height)
+	local button = parent:AttachFrame("Button")
+	button:SetFrameStrata(parent:GetFrameStrata()) -- Machinery is broken.
+
+	-- SetToDefaults wipes button state, desired states must be explicitly set now.
+	button:Show()
+
+	SetPropagateMouseMotionDelegate(button, true)
+
+	button:SetMouseClickEnabled(true)
+	button:SetMouseMotionEnabled(true)
+	button:SetSize(width or 16, height or 16)
+
+	return button
+end
+
+-- MenuTemplates.CreateTitle's initializer, with MenuVariants.CreateFontString.
+local function TitleInitializer(text)
+	return function(frame)
+		local fontString = frame:AttachFontString()
+		fontString:SetPoint("LEFT")
+		fontString:SetHeight(20)
+		frame.fontString = fontString
+		fontString:SetTextToFit(text)
+	end
+end
+
+-- The Filter menu opens with the addon's rows (Menu.ModifyMenu). The menu (Menu.lua, on the
+-- FULLSCREEN_DIALOG strata) makes a frame for each title and frame row, sizes it 1 by 1, and
+-- calls its initializers: the row's own first, then the ones added to it; the last size one
+-- returns is the row's (CallInitializers). The stat submenus are Blizzard's own buttons and
+-- checkboxes, left out. Returns the rows: { kind, frame, width, height }.
+local function OpenFilterMenu()
+	local rows = {}
+	local function Row(kind, initializer)
+		local row = { kind = kind, initializers = { initializer } }
+		function row:AddInitializer(func) self.initializers[#self.initializers + 1] = func end
+		rows[#rows + 1] = row
+		return row
+	end
+	local root = {}
+	function root:CreateTitle(text) return Row("title", TitleInitializer(text)) end
+	function root:CreateFrame() return Row("frame", function() end) end
+	function root:CreateButton()
+		return { CreateCheckbox = function() end, CreateDivider = function() end }
+	end
+	Menu.modify(nil, root)
+	local menu = NewWidget("Frame")
+	menu:SetFrameStrata("FULLSCREEN_DIALOG")
+	for _, row in ipairs(rows) do
+		local frame = Configure(NewWidget("Frame", menu))
+		frame:SetSize(1, 1)
+		for _, initializer in ipairs(row.initializers) do
+			local width, height = initializer(frame)
+			if width and height then
+				row.width, row.height = width, height
+			end
+		end
+		row.frame = frame
+	end
+	return rows
+end
+
+-- What is attached to a frame of the menu, of one type, in the order attached.
+local function Attached(frame, objectType)
+	local found = {}
+	for _, child in ipairs(frame.children) do
+		if child:GetObjectType() == objectType then
+			found[#found + 1] = child
+		end
+	end
+	return found
+end
+
+--------------------------------------------------------------------------------
 -- Load the addon
 --------------------------------------------------------------------------------
 
@@ -485,19 +947,19 @@ local function Tick()
 		end
 	end
 	ServerTick()
-	for _, frame in ipairs(frames) do
-		if frame.shown and frame.scripts.OnUpdate then
-			frame.scripts.OnUpdate(frame)
+	-- Each visible frame's OnUpdate. ASSUMED: in the order the frames were made, so Blizzard's
+	-- list (redrawing when marked) goes before the addon's frames.
+	for _, widget in ipairs(widgets) do
+		local onUpdate = widget.scripts.OnUpdate
+		if onUpdate and widget:IsVisible() then
+			onUpdate(widget, 0.05)
 		end
-	end
-	if list.scrollFrameDirty then
-		list:RefreshScrollFrame()
 	end
 end
 
 -- The player presses the mouse button on the list (on a row, if there are rows), or lets it go.
 local function Press()
-	mouse.down, mouse.overRows, mouse.pressOnRows = true, true, list.dataSize > 0
+	mouse.down, mouse.over, mouse.pressOnRows = true, scrollBox, list.dataSize > 0
 end
 local function Release()
 	mouse.down, mouse.pressOnRows = false, false
@@ -708,47 +1170,24 @@ scenarios["error puts the list back"] = function()
 	return true
 end
 
--- The menu's title: the addon's name, and its version right-aligned in grey on the same row.
+-- The menu's title: the addon's name, and its version right-aligned in grey on the same row, in
+-- the title's font: attached text, which refuses SetFont.
 scenarios["menu title"] = function()
-	local function FontString(text)
-		local fontString = { text = text, points = {} }
-		-- As Blizzard's menu (Compositor.lua): attached text starts in GameFontHighlight, and
-		-- SetFont on it is an error.
-		fontString.fontObject = "GameFontHighlight"
-		function fontString:SetFont() error("Use of function 'SetFont' is disallowed (Call).") end
-		function fontString:SetHeight() end
-		function fontString:SetPoint(point) self.points[#self.points + 1] = point end
-		function fontString:SetJustifyH(justify) self.justify = justify end
-		function fontString:SetTextColor(r, g, b) self.color = { r, g, b } end
-		function fontString:SetText(newText) self.text = newText end
-		function fontString:GetUnboundedStringWidth() return #self.text * 6 end
-		return fontString
+	local rows = OpenFilterMenu()
+	local title = rows[1]
+	if not (title and title.kind == "title") then
+		return false, "the addon's rows don't start with a title"
 	end
-	local title, initializers
-	local root = {}
-	function root:CreateTitle(text)
-		title = text
-		initializers = {}
-		return { AddInitializer = function(_, initializer) initializers[#initializers + 1] = initializer end }
+	local texts = Attached(title.frame, "FontString")
+	local name, version = texts[1], texts[2]
+	if #texts ~= 2 or name ~= title.frame.fontString or name:GetText() ~= "Stat Shopper" then
+		return false, "title " .. tostring(name and name:GetText())
 	end
-	function root:CreateButton()
-		return { CreateCheckbox = function() end, CreateDivider = function() end }
+	local text = version:GetText() or ""
+	if not (text:match("^v%d+%.%d+%.%d+$") and version.justifyH == "RIGHT" and version.points[1] and version.points[1].point == "RIGHT") then
+		return false, "version " .. text
 	end
-	function root:CreateFrame()
-		return { AddInitializer = function() end }
-	end
-	Menu.modify(nil, root)
-	local attached
-	local frame = { fontString = FontString(title) }
-	function frame:AttachFontString() attached = FontString("") return attached end
-	local width, height = initializers[1](frame)
-	if title ~= "Stat Shopper" then
-		return false, "title " .. tostring(title)
-	end
-	if not (attached and attached.text:match("^v%d+%.%d+%.%d+$") and attached.justify == "RIGHT" and attached.points[1] == "RIGHT") then
-		return false, "version " .. tostring(attached and attached.text)
-	end
-	if attached.color[1] ~= 0.5 or attached.fontObject ~= frame.fontString.fontObject or width < (#title + #attached.text) * 6 or height ~= 20 then
+	if version.color[1] ~= 0.5 or version.fontObject ~= name.fontObject or title.width < (#name:GetText() + #text) * 6 or title.height ~= 20 then
 		return false, "version's look or the row's size"
 	end
 	return true
@@ -779,133 +1218,67 @@ scenarios["match any"] = function()
 end
 
 -- The row under the title: Match all and Match any side by side, built from what Blizzard's menu
--- attaches (Compositor.lua: frames, textures and text; CreateTexture and CreateFontString are
--- disallowed on attached frames, SetFont on attached text). A click moves the tick. The red X
--- shows while Match any is chosen, also with nothing ticked, and goes back to Match all.
+-- attaches (frames, textures and text; CreateTexture and CreateFontString are refused on the
+-- menu's frames, SetFont on attached text). A click moves the tick. The red X shows while Match
+-- any is chosen, also with nothing ticked, and goes back to Match all.
 scenarios["match choice"] = function()
-	local function Region()
-		local region = { points = {}, shown = true, width = 1, height = 1 }
-		function region:SetPoint(point, relative, relativePoint, x, y)
-			if type(relative) == "number" then
-				relative, x = nil, relative
-			end
-			self.points[#self.points + 1] = { point = point, x = x or 0 }
-		end
-		function region:SetAllPoints() end
-		function region:SetSize(width, height) self.width, self.height = width, height end
-		function region:SetWidth(width) self.width = width end
-		function region:SetHeight(height) self.height = height end
-		function region:GetWidth() return self.width end
-		function region:Show() self.shown = true end
-		function region:Hide() self.shown = false end
-		function region:SetShown(shown) self.shown = not not shown end
-		function region:IsShown() return self.shown end
-		return region
-	end
-	local function Texture()
-		local texture = Region()
-		texture.layer, texture.level = "ARTWORK", 0
-		function texture:SetAtlas(atlas, useAtlasSize)
-			self.atlas = atlas
-			if useAtlasSize then self.width, self.height = 16, 16 end
-		end
-		function texture:SetTexture(file) self.file = file end
-		function texture:SetBlendMode() end
-		function texture:SetDrawLayer(layer, level) self.layer, self.level = layer, level or 0 end
-		function texture:GetDrawLayer() return self.layer, self.level end
-		return texture
-	end
-	local function FontString()
-		local fontString = Region()
-		fontString.width = 150
-		function fontString:SetFont() error("Use of function 'SetFont' is disallowed (Call).") end
-		function fontString:SetTextToFit(text) self.text = text self.width = #text * 6 end
-		function fontString:SetText(text) self.text = text end
-		function fontString:GetUnboundedStringWidth() return #self.text * 6 end
-		return fontString
-	end
-	local function AttachedFrame()
-		local frame = Region()
-		frame.textures, frame.fontStrings, frame.children, frame.scripts = {}, {}, {}, {}
-		function frame:CreateTexture() error("Use of function 'CreateTexture' is disallowed (Call).") end
-		function frame:CreateFontString() error("Use of function 'CreateFontString' is disallowed (Call).") end
-		function frame:AttachTexture() local texture = Texture() self.textures[#self.textures + 1] = texture return texture end
-		function frame:AttachFontString() local fontString = FontString() self.fontStrings[#self.fontStrings + 1] = fontString return fontString end
-		-- As Compositor.lua: the frame is shown, then SetToDefaults resets it (hidden, mouse off).
-		function frame:AttachFrame()
-			local child = AttachedFrame()
-			child.shown, child.strata = false, "MEDIUM"
-			self.children[#self.children + 1] = child
-			return child
-		end
-		function frame:SetFrameStrata(strata) self.strata = strata end
-		function frame:GetFrameStrata() return self.strata end
-		function frame:SetMouseClickEnabled(enabled) self.mouse = enabled end
-		function frame:SetMouseMotionEnabled(enabled) self.motion = enabled end
-		function frame:EnableMouse(enabled) self.mouse, self.motion = enabled, enabled end
-		function frame:RegisterForClicks(...) self.clicks = { ... } end
-		function frame:SetScript(script, func) self.scripts[script] = func end
-		return frame
-	end
-	local rowInitializers = {}
-	local root = {}
-	function root:CreateTitle()
-		return { AddInitializer = function() end }
-	end
-	function root:CreateFrame()
-		return { AddInitializer = function(_, initializer) rowInitializers[#rowInitializers + 1] = initializer end }
-	end
-	function root:CreateButton()
-		return { CreateCheckbox = function() end, CreateDivider = function() end }
-	end
-	Menu.modify(nil, root)
-	if #rowInitializers ~= 1 then
-		return false, #rowInitializers .. " rows of the addon's own"
-	end
 	TickStats({})
-	local row = AttachedFrame()
-	row.strata = "FULLSCREEN_DIALOG"
-	local width, height = rowInitializers[1](row)
-	local all, any = row.children[1], row.children[2]
-	if #row.children ~= 2 or all.fontStrings[1].text ~= "Match all" or any.fontStrings[1].text ~= "Match any" then
+	local rows = OpenFilterMenu()
+	local own = {}
+	for _, row in ipairs(rows) do
+		if row.kind == "frame" then
+			own[#own + 1] = row
+		end
+	end
+	if #own ~= 1 then
+		return false, #own .. " rows of the addon's own"
+	end
+	local row = own[1]
+	local buttons = Attached(row.frame, "Button")
+	local all, any = buttons[1], buttons[2]
+	local function Text(button)
+		local text = Attached(button, "FontString")[1]
+		return text and text:GetText()
+	end
+	if #row.frame.children ~= 2 or #buttons ~= 2 or Text(all) ~= "Match all" or Text(any) ~= "Match any" then
 		return false, "the row's choices"
 	end
-	local function Tick(button)
-		for _, texture in ipairs(button.textures) do
+	local function TickMark(button)
+		for _, texture in ipairs(Attached(button, "Texture")) do
 			if texture.atlas == "common-dropdown-icon-radialtick-yellow" then
 				return texture
 			end
 		end
 	end
-	if not (Tick(all) and Tick(any) and Tick(all):IsShown() and not Tick(any):IsShown()) then
+	if not (TickMark(all) and TickMark(any) and TickMark(all):IsShown() and not TickMark(any):IsShown()) then
 		return false, "Match all isn't the one ticked at first"
 	end
-	if any.points[1].x < all.points[1].x + all.width or width < any.points[1].x + any.width or height ~= 20 then
+	if any.points[1].x < all.points[1].x + all:GetWidth() or row.width < any.points[1].x + any:GetWidth() or row.height ~= 20 then
 		return false, "the choices aren't side by side inside the row"
 	end
-	for _, button in ipairs(row.children) do
-		if not (button:IsShown() and button.strata == row.strata) then
+	for _, button in ipairs(buttons) do
+		if not (button:IsShown() and button:GetFrameStrata() == row.frame:GetFrameStrata()) then
 			return false, "a choice isn't shown with the menu"
 		end
-		if not (button.mouse and button.motion and button.scripts.OnClick and button.scripts.OnEnter and button.scripts.OnLeave) then
+		if not (button:IsMouseClickEnabled() and button:IsMouseMotionEnabled() and button:GetScript("OnClick") and button:GetScript("OnEnter") and button:GetScript("OnLeave")) then
 			return false, "a choice can't be clicked or highlighted"
 		end
 	end
 	local x = filterButton.ClearFiltersButton
-	any.scripts.OnClick(any, "LeftButton")
-	if StatShopperDB.matchAny ~= true or Tick(all):IsShown() or not Tick(any):IsShown() then
+	any:GetScript("OnClick")(any, "LeftButton")
+	if StatShopperDB.matchAny ~= true or TickMark(all):IsShown() or not TickMark(any):IsShown() then
 		return false, "clicking Match any"
 	end
 	if not x:IsShown() then
 		return false, "no red X with Match any chosen and nothing ticked"
 	end
-	all.scripts.OnClick(all, "LeftButton")
+	all:GetScript("OnClick")(all, "LeftButton")
 	if StatShopperDB.matchAny ~= false or x:IsShown() then
 		return false, "back to Match all with nothing ticked: the red X stayed"
 	end
 	-- The red X (Blizzard's Reset on the Filter button, hooked).
 	TickStats({ "STRENGTH" })
-	any.scripts.OnClick(any, "LeftButton")
+	any:GetScript("OnClick")(any, "LeftButton")
 	x:Show()
 	filterButton:Reset()
 	if StatShopperDB.matchAny ~= false or next(StatShopperDB.stats) or x:IsShown() then
