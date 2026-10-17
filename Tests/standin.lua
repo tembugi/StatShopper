@@ -6,12 +6,13 @@
 -- Blizzard's code below copies wow-ui-source (forever, 1.60.1): Shared/Blizzard_AuctionHouseFrame,
 -- Blizzard_AuctionHouseBrowseResultsFrame and Blizzard_AuctionHouseItemList, and Blizzard_Menu's
 -- Menu.lua, Compositor.lua, MenuTemplates.lua and MenuVariants.lua, cut to what the addon
--- touches. The widgets have only the methods Forever's widgets have (Tests/WidgetAPI.lua). The
--- server is a model; what the stand-in assumes beyond the game's code is marked ASSUMED: a
--- stand-in that behaves better than the game hides bugs.
+-- touches. The widgets have only the methods Forever's widgets have (Tests/WidgetAPI.lua). In
+-- combat the game refuses the addon's code moving, showing or hiding a protected frame, as the
+-- game does (see Combat). The server is a model; what the stand-in assumes beyond the game's
+-- code is marked ASSUMED: a stand-in that behaves better than the game hides bugs.
 
--- This file runs under luajit, outside the game, and uses standard Lua's dofile, loadfile, os
--- and io. It plays the game, so it sets the game's globals.
+-- This file runs under luajit, outside the game, and uses standard Lua's dofile, loadfile, os,
+-- io and debug. It plays the game, so it sets the game's globals.
 ---@diagnostic disable: undefined-global, lowercase-global
 
 local scenario = arg[1]
@@ -54,12 +55,184 @@ function wipe(t) for key in pairs(t) do t[key] = nil end return t end
 function tCompare() return true end
 local errors = {}
 function CallErrorHandler(message) errors[#errors + 1] = tostring(message) .. "\n" .. debug.traceback() end
+
+--------------------------------------------------------------------------------
+-- Combat. While InCombatLockdown() is true, the game refuses a protected frame's protected
+-- methods when the addon's code calls them: the call does nothing and the game reports
+-- ADDON_ACTION_BLOCKED. The stand-in does the same and lists each refusal in `blocked`; a
+-- scenario fails on any. ASSUMED: a call is refused whether or not it would change anything.
+--------------------------------------------------------------------------------
+
+local combat = false
+local blocked = {}
+
+-- The protected methods: those wow-ui-source marks IsProtectedFunction (forever,
+-- Blizzard_APIDocumentationGenerated), by the part of the widget API they are in.
+local PROTECTED_API = {
+	-- SimpleScriptRegionAPIDocumentation.lua and SimpleScriptRegionResizingAPIDocumentation.lua
+	ScriptRegion = {
+		"AdjustPointsOffset", "ClearAllPoints", "ClearPoint", "ClearPointsOffset", "EnableMouse",
+		"EnableMouseMotion", "EnableMouseWheel", "FocusEnter", "FocusExit", "MouseDown", "MouseUp",
+		"SetAllPoints", "SetCollapsesLayout", "SetHeight", "SetMouseClickEnabled",
+		"SetMouseMotionEnabled", "SetParent", "SetPassThroughButtons", "SetPoint", "SetPointsOffset",
+		"SetPropagateMouseClicks", "SetPropagateMouseMotion", "SetRoundLayoutToNearestPixel",
+		"SetSize", "SetWidth",
+	},
+	-- SimpleRegionAPIDocumentation.lua
+	Region = { "SetIgnoreParentScale", "SetScale" },
+	-- SimpleFrameAPIDocumentation.lua
+	Frame = {
+		"AddRoleset", "ClearAttribute", "ClearAttributes", "EnableGamePadButton",
+		"EnableGamePadStick", "EnableKeyboard", "Hide", "Lower", "Raise", "RemoveRoleset",
+		"ResizeToBoundsRect", "SetClampRectInsets", "SetClampedToScreen", "SetFixedFrameLevel",
+		"SetFixedFrameStrata", "SetFrameLevel", "SetFrameStrata", "SetHitRectInsets",
+		"SetHyperlinksEnabled", "SetID", "SetIgnoreParentScale", "SetRolesets", "SetScale",
+		"SetShown", "SetToplevel", "SetUsingParentLevel", "Show", "StartMoving", "StartSizing",
+		"StopMovingOrSizing",
+	},
+	-- SimpleButtonAPIDocumentation.lua
+	Button = { "Disable", "Enable", "RegisterForClicks", "RegisterForMouse", "SetEnabled" },
+}
+-- The parts each widget type has (BlizzardInterfaceResources, Resources/WidgetAPI.lua): a
+-- texture's Show, for one, is the region's and not protected.
+local PROTECTED_METHODS = {}
+for widgetType, parts in pairs({
+	Frame = { "ScriptRegion", "Frame" },
+	Button = { "ScriptRegion", "Frame", "Button" },
+	Texture = { "ScriptRegion", "Region" },
+	FontString = { "ScriptRegion", "Region" },
+}) do
+	local set = {}
+	for _, part in ipairs(parts) do
+		for _, name in ipairs(PROTECTED_API[part]) do
+			set[name] = true
+		end
+	end
+	PROTECTED_METHODS[widgetType] = set
+end
+
+local FRAME_TYPES = { Frame = true, Button = true }
+
+-- Whether a widget is protected, as IsProtected says. A frame is protected explicitly
+-- (widget.protected: protected="true" in its XML or its template's, as SecureFrameTemplate in
+-- Blizzard_FrameXML/SecureTemplatesBase.xml, which the secure templates inherit), or because a
+-- frame under it is: seen in game (Just the Trees' taint log, 2026-10-17), the action bars,
+-- protected only through their buttons, had SetPoint and ClearAllPoints blocked in combat.
+-- ASSUMED: a texture or text is protected when its frame is (regions have protected methods,
+-- and nothing else could make one protected).
+local function IsProtected(widget)
+	if widget.protected then
+		return true
+	end
+	if FRAME_TYPES[widget.widgetType] then
+		for _, child in ipairs(widget.children) do
+			if FRAME_TYPES[child.widgetType] and IsProtected(child) then
+				return true
+			end
+		end
+		return false
+	end
+	return widget.parent ~= nil and IsProtected(widget.parent)
+end
+
+-- Whose code is calling, as the game taints a run of code. A run is what the game starts: an
+-- event's handler, a frame's script, a timer, a call into Blizzard's code. It is the addon's
+-- from the moment it enters a function from the addon's files to the end of the run,
+-- Blizzard's code it calls on the way included; hooksecurefunc keeps its hook's taint inside
+-- the hook, and so does Blizzard's menu calling the addon (securecallfunction). An event the
+-- game sends during a run goes to each handler in a run of its own, which starts with the
+-- outer run's taint and gives none back: seen in game (Just the Trees' taint log, 2026-10-17),
+-- an addon's ADDON_LOADED handler ran inside the player's first open of the talent window, and
+-- nothing after it in that open ran tainted. A call the scenarios make outside a run is the
+-- addon's when the addon's code is on the stack. Not modeled: taint the addon leaves in
+-- Blizzard's tables for later (the game's taint log finds that).
+local ADDON_FILES = { ["@Stats.lua"] = true, ["@StatShopper.lua"] = true }
+local currentRun -- the run going on: { tainted = whether it is the addon's }
+
+local function AddonOnStack()
+	local level = 3
+	while true do
+		local info = debug.getinfo(level, "S")
+		if not info then
+			return false
+		end
+		if ADDON_FILES[info.source] then
+			return true
+		end
+		level = level + 1
+	end
+end
+
+-- In combat, a debug hook marks the run tainted as it enters the addon's code (tail calls too,
+-- which leave no trace on the stack).
+local function OnCall()
+	if currentRun and not currentRun.tainted then
+		local info = debug.getinfo(2, "S")
+		if info and ADDON_FILES[info.source] then
+			currentRun.tainted = true
+		end
+	end
+end
+
+local function AddonCalling()
+	return (currentRun ~= nil and currentRun.tainted) or AddonOnStack()
+end
+
+local function EndRun(run, ...)
+	if currentRun == run then
+		currentRun = nil
+	end
+	return ...
+end
+
+-- Runs func as the game runs code. Within a run, it is part of that run.
+local function GameRun(func, ...)
+	if currentRun then
+		return func(...)
+	end
+	local run = { tainted = AddonOnStack() }
+	currentRun = run
+	return EndRun(run, func(...))
+end
+
+local function EndRunApart(outer, ...)
+	currentRun = outer
+	return ...
+end
+
+-- Runs an event's handler: a run of its own, even within another run.
+local function RunApart(func, ...)
+	local outer = currentRun
+	currentRun = { tainted = outer and outer.tainted or AddonOnStack() }
+	return EndRunApart(outer, func(...))
+end
+
+local function EndHook(run, tainted, ...)
+	if run then
+		run.tainted = tainted
+	end
+	return ...
+end
+
+-- A hook's taint stays inside the hook (hooksecurefunc; ASSUMED for HookScript too, which the
+-- game also calls a secure hook).
+local function RunHook(hook, ...)
+	local run = currentRun
+	return EndHook(run, run and run.tainted, hook(...))
+end
+
+function InCombatLockdown()
+	return combat
+end
+
 function hooksecurefunc(owner, name, hook)
 	local original = owner[name]
 	owner[name] = function(...)
-		local results = { original(...) }
-		hook(...)
-		return unpack(results)
+		return GameRun(function(...)
+			local results = { original(...) }
+			RunHook(hook, ...)
+			return unpack(results)
+		end, ...)
 	end
 end
 
@@ -109,14 +282,35 @@ local function Refused(name)
 	end
 end
 
+local protectedMethods = {} -- by widget type and name: the method, refused in combat
+local function ProtectedMethod(widgetType, name, method)
+	local byName = protectedMethods[widgetType] or {}
+	protectedMethods[widgetType] = byName
+	if not byName[name] then
+		byName[name] = function(self, ...)
+			if combat and IsProtected(self) and AddonCalling() then
+				blocked[#blocked + 1] = (self.name or "a protected " .. widgetType) .. ":" .. name .. "()"
+				return
+			end
+			return method(self, ...)
+		end
+	end
+	return byName[name]
+end
+
 local WidgetMeta = {
 	__index = function(widget, key)
 		local refused = rawget(widget, "refused")
 		if refused and refused[key] then
 			return Refused(key)
 		end
-		if WIDGET_METHODS[rawget(widget, "widgetType")][key] then
-			return Widget[key] or Recorder(key)
+		local widgetType = rawget(widget, "widgetType")
+		if WIDGET_METHODS[widgetType][key] then
+			local method = Widget[key] or Recorder(key)
+			if PROTECTED_METHODS[widgetType] and PROTECTED_METHODS[widgetType][key] then
+				return ProtectedMethod(widgetType, key, method)
+			end
+			return method
 		end
 		return nil
 	end,
@@ -149,6 +343,9 @@ end
 
 function Widget:GetObjectType()
 	return self.widgetType
+end
+function Widget:IsProtected()
+	return IsProtected(self), self.protected == true
 end
 function Widget:GetParent()
 	return self.parent
@@ -218,7 +415,7 @@ function Widget:HookScript(name, func)
 	local old = self.scripts[name]
 	self.scripts[name] = old and function(...)
 		old(...)
-		func(...)
+		RunHook(func, ...)
 	end or func
 end
 
@@ -239,7 +436,7 @@ local function FireEvent(event, ...)
 	for _, widget in ipairs(widgets) do
 		local onEvent = widget.scripts.OnEvent
 		if widget.events[event] and onEvent then
-			onEvent(widget, event, ...)
+			RunApart(onEvent, widget, event, ...)
 		end
 	end
 end
@@ -553,7 +750,16 @@ local ItemListState = { NoSearch = 1, NoResults = 2, ResultsPending = 3, ShowRes
 local ROWS_ON_SCREEN = 10
 local BROWSE_SCROLL_OFFSET_REFRESH_THRESHOLD = 30
 
-AuctionHouseFrame = NewWidget("Frame")
+-- UIParent is protected through the frames under it: the action bars, PlayerFrame and more
+-- (parent="UIParent" in Blizzard_ActionBar/Mainline/MainActionBar.xml and
+-- Blizzard_UnitFrame/Mainline/PlayerFrame.xml). The stand-in doesn't make those, so it marks
+-- UIParent itself.
+UIParent = NewWidget("Frame")
+UIParent.name = "UIParent"
+UIParent.protected = true
+-- parent="UIParent" (Shared/Blizzard_AuctionHouseFrame.xml).
+AuctionHouseFrame = NewWidget("Frame", UIParent)
+AuctionHouseFrame.name = "AuctionHouseFrame"
 local searchBar = NewWidget("Frame", AuctionHouseFrame)
 local filterButton = NewWidget("Button", searchBar)
 filterButton.ClearFiltersButton = NewWidget("Button", filterButton)
@@ -892,10 +1098,12 @@ local function Rest(_, ...)
 	return ...
 end
 local function MenuCall(func, ...)
-	return Rest(xpcall(func, function(message)
-		menuErrors = menuErrors + 1
-		CallErrorHandler(message)
-	end, ...))
+	return RunHook(function(...)
+		return Rest(xpcall(func, function(message)
+			menuErrors = menuErrors + 1
+			CallErrorHandler(message)
+		end, ...))
+	end, ...)
 end
 
 -- The Filter menu opens with the addon's rows (Menu.ModifyMenu). The menu (Menu.lua, on the
@@ -905,38 +1113,40 @@ end
 -- checkboxes, left out; each checkbox is kept as { text, isSelected, setSelected, data }.
 -- Returns the rows ({ kind, frame, width, height }) and the checkboxes.
 local function OpenFilterMenu()
-	local rows = {}
-	local checkboxes = {}
-	local function Row(kind, initializer)
-		local row = { kind = kind, initializers = { initializer } }
-		function row:AddInitializer(func) self.initializers[#self.initializers + 1] = func end
-		rows[#rows + 1] = row
-		return row
-	end
-	local submenu = {}
-	function submenu:CreateCheckbox(text, isSelected, setSelected, data)
-		checkboxes[#checkboxes + 1] = { text = text, isSelected = isSelected, setSelected = setSelected, data = data }
-	end
-	function submenu:CreateDivider() end
-	local root = {}
-	function root:CreateTitle(text) return Row("title", TitleInitializer(text)) end
-	function root:CreateFrame() return Row("frame", function() end) end
-	function root:CreateButton() return submenu end
-	MenuCall(Menu.modify, nil, root)
-	local menu = NewWidget("Frame")
-	menu:SetFrameStrata("FULLSCREEN_DIALOG")
-	for _, row in ipairs(rows) do
-		local frame = Configure(NewWidget("Frame", menu))
-		frame:SetSize(1, 1)
-		for _, initializer in ipairs(row.initializers) do
-			local width, height = MenuCall(initializer, frame)
-			if width and height then
-				row.width, row.height = width, height
-			end
+	return GameRun(function()
+		local rows = {}
+		local checkboxes = {}
+		local function Row(kind, initializer)
+			local row = { kind = kind, initializers = { initializer } }
+			function row:AddInitializer(func) self.initializers[#self.initializers + 1] = func end
+			rows[#rows + 1] = row
+			return row
 		end
-		row.frame = frame
-	end
-	return rows, checkboxes
+		local submenu = {}
+		function submenu:CreateCheckbox(text, isSelected, setSelected, data)
+			checkboxes[#checkboxes + 1] = { text = text, isSelected = isSelected, setSelected = setSelected, data = data }
+		end
+		function submenu:CreateDivider() end
+		local root = {}
+		function root:CreateTitle(text) return Row("title", TitleInitializer(text)) end
+		function root:CreateFrame() return Row("frame", function() end) end
+		function root:CreateButton() return submenu end
+		MenuCall(Menu.modify, nil, root)
+		local menu = NewWidget("Frame")
+		menu:SetFrameStrata("FULLSCREEN_DIALOG")
+		for _, row in ipairs(rows) do
+			local frame = Configure(NewWidget("Frame", menu))
+			frame:SetSize(1, 1)
+			for _, initializer in ipairs(row.initializers) do
+				local width, height = MenuCall(initializer, frame)
+				if width and height then
+					row.width, row.height = width, height
+				end
+			end
+			row.frame = frame
+		end
+		return rows, checkboxes
+	end)
 end
 
 -- A checkbox in a stat submenu: drawn (its initializer asks whether it is ticked:
@@ -964,8 +1174,8 @@ end
 --------------------------------------------------------------------------------
 
 local ns = {}
-assert(loadfile("Stats.lua"))("StatShopper", ns)
-assert(loadfile("StatShopper.lua"))("StatShopper", ns)
+GameRun(assert(loadfile("Stats.lua")), "StatShopper", ns)
+GameRun(assert(loadfile("StatShopper.lua")), "StatShopper", ns)
 
 --------------------------------------------------------------------------------
 -- Playing
@@ -987,9 +1197,23 @@ local function Tick()
 	for _, widget in ipairs(widgets) do
 		local onUpdate = widget.scripts.OnUpdate
 		if onUpdate and widget:IsVisible() then
-			onUpdate(widget, 0.05)
+			GameRun(onUpdate, widget, 0.05)
 		end
 	end
+end
+
+-- Combat, as the game has it: PLAYER_REGEN_DISABLED, then InCombatLockdown() is true until
+-- combat ends, then PLAYER_REGEN_ENABLED. ASSUMED: the game sends PLAYER_REGEN_DISABLED just
+-- before the lockdown starts and PLAYER_REGEN_ENABLED just after it ends.
+local function EnterCombat()
+	FireEvent("PLAYER_REGEN_DISABLED")
+	combat = true
+	debug.sethook(OnCall, "c")
+end
+local function LeaveCombat()
+	combat = false
+	debug.sethook()
+	FireEvent("PLAYER_REGEN_ENABLED")
 end
 
 -- The player presses the mouse button on the list (on a row, if there are rows), or lets it go.
@@ -1470,6 +1694,87 @@ scenarios["clicks are never lost"] = function()
 	return true
 end
 
+-- Combat: the game refuses the addon's code moving, showing or hiding a protected frame then
+-- (see Combat); any refusal fails the scenario (see Main). The player searches, uses the
+-- Filter menu, sorts and views an item in combat; nothing waits for combat to end, and the
+-- search sent in combat finishes after it.
+scenarios["combat"] = function()
+	MakeItems()
+	TickStats({ "INTELLECT" })
+	EnterCombat()
+	AuctionHouseFrame:SendBrowseQuery("everything")
+	Run(1)
+	local rows, checkboxes = OpenFilterMenu()
+	local own
+	for _, row in ipairs(rows) do
+		if row.kind == "frame" then
+			own = row
+		end
+	end
+	local all, any = unpack(Attached(own.frame, "Button"))
+	GameRun(any:GetScript("OnClick"), any, "LeftButton")
+	GameRun(all:GetScript("OnClick"), all, "LeftButton")
+	for _, checkbox in ipairs(checkboxes) do
+		DrawCheckbox(checkbox)
+		if checkbox.data == "STRENGTH" then
+			ClickCheckbox(checkbox)
+			ClickCheckbox(checkbox)
+		end
+	end
+	results:SetSortOrder(Enum.AuctionHouseSortOrder.Name)
+	Run(1)
+	AuctionHouseFrame:QueryItem(AuctionHouseSearchContext.BuyItems, Result(2).itemKey)
+	AuctionHouseFrame:SetDisplayMode(AuctionHouseFrameDisplayMode.ItemBuy)
+	Run(1)
+	AuctionHouseFrame:SetDisplayMode(AuctionHouseFrameDisplayMode.Buy)
+	Run(1)
+	LeaveCombat()
+	Run(15)
+	if Shown() ~= "item2,item4,item9*" then
+		return false, "shown after combat: " .. Shown()
+	end
+	if StatShopperDB.matchAny ~= false or not StatShopperDB.stats.INTELLECT or StatShopperDB.stats.STRENGTH then
+		return false, "the ticks and the Match choice after combat"
+	end
+	return true
+end
+
+-- The stand-in refuses the addon's code moving a protected frame in combat, and only the
+-- addon's: code it counts as the addon's is a chunk named after the addon's file.
+scenarios["combat refusal"] = function()
+	local function AddonCode(code)
+		return assert(load(code, "@StatShopper.lua"))
+	end
+	AddonCode("UIParent:SetScale(0.9)")()
+	if #blocked > 0 then
+		return false, "refused out of combat"
+	end
+	EnterCombat()
+	AddonCode("UIParent:Hide() AuctionHouseFrame:SetPoint('CENTER')")()
+	if table.concat(blocked, ", ") ~= "UIParent:Hide()" or not UIParent:IsShown() then
+		return false, "the addon in combat: " .. table.concat(blocked, ", ")
+	end
+	blocked = {}
+	assert(load("UIParent:Hide() UIParent:Show()", "@Interface/AddOns/Blizzard_Test/Test.lua"))()
+	if #blocked > 0 then
+		return false, "Blizzard's code refused in combat"
+	end
+	-- An addon's function that tail-calls a protected method, from an event: still refused.
+	local hide = AddonCode("return function() return UIParent:Hide() end")()
+	local frame = NewWidget("Frame")
+	frame:RegisterEvent("TEST_EVENT")
+	frame:SetScript("OnEvent", function()
+		hide()
+	end)
+	FireEvent("TEST_EVENT")
+	if table.concat(blocked, ", ") ~= "UIParent:Hide()" then
+		return false, "the tail call in combat: " .. table.concat(blocked, ", ")
+	end
+	blocked = {}
+	LeaveCombat()
+	return true
+end
+
 --------------------------------------------------------------------------------
 
 local function Main()
@@ -1482,6 +1787,9 @@ local function Main()
 		os.exit(2)
 	end
 	local ok, why = run(tonumber(arg[2]), tonumber(arg[3]))
+	if #blocked > 0 then
+		ok, why = false, "ADDON_ACTION_BLOCKED in combat: " .. table.concat(blocked, ", ") .. (ok and "" or "; then " .. tostring(why))
+	end
 	if ok and #errors > 0 then
 		ok, why = false, "addon error: " .. errors[1]
 	end
