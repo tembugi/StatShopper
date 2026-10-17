@@ -1,7 +1,6 @@
 # Left out of git archive, which deploys the addon for tests.
 .gitignore export-ignore
 .gitattributes export-ignore
-AGENTS.md export-ignore
 CLAUDE.md export-ignore
 Logo export-ignore
 Tests export-ignore

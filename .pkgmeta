@@ -8,7 +8,6 @@ manual-changelog:
   markup-type: markdown
 
 ignore:
-  - AGENTS.md
   - CLAUDE.md
   - Logo
   - README.md
