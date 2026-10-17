@@ -52,7 +52,7 @@ Agreed with the user.
 
 ## Errors
 - When the auction house loads, the addon checks the Blizzard pieces it plugs into. If one is missing, it says so once (with its version) and adds nothing.
-- Every hook and handler runs through `Guarded` (`xpcall` with `CallErrorHandler`), so an error never breaks Blizzard's code. The first error is reported and said once in chat; the search's full list goes back on screen, and the filters stay off until /reload.
+- Every hook and handler runs through `Guarded` (the shared error rule). After the first error the search's full list goes back on screen, and the filters stay off until /reload.
 
 ## Tests
 `luajit Tests/run.lua` checks the rules in `Stats.lua`: the stat list (labels, dividers, a stat in two groups the same in both), Spell Power counting for Spell Damage and Spell Healing, a resistance under either name, reading stats from the stat table with and without an ending, what an ending adds, the all-of and any-of rules, telling results apart, sorting like the browse list, the ticks a search keeps, `NormalizeSaved` and `NormalizeAccount`. Their items, endings and names are made up, shaped like what the game gave.
