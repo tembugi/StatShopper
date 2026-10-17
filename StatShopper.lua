@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Keep equal to ## Version in the .toc. The game reads the .toc only at client start, so the
 -- menu's title and the chat line about a changed auction house use this, which /reload picks up.
-local VERSION = "1.2.0"
+local VERSION = "1.2.1"
 -- The addon's name as the player sees it: the start of chat lines.
 local ADDON_TITLE = "Stat Shopper"
 
@@ -715,20 +715,26 @@ local function ShowAllResults()
 	end
 end
 
--- The filters run inside Blizzard's auction house code, right after it gets results. An error
--- there must not break the code that called it, nor repeat on every page. The first error is
--- reported through the game's error handler and said once in chat; the search's results go
--- back on screen unfiltered, and the filters stay off until /reload.
-Guarded = function(func, ...)
-	if stopped then
-		return
-	end
-	if xpcall(func, CallErrorHandler, ...) then
-		return
+-- What Guarded does once func has run: passes its results on, or after its error stops the filters.
+local function Finish(ok, ...)
+	if ok then
+		return ...
 	end
 	stopped = true
 	SayProblem("The stat filters stopped working and are off.", "Type /reload to turn them back on.")
 	xpcall(ShowAllResults, CallErrorHandler)
+end
+
+-- The filters run inside Blizzard's auction house code, right after it gets results, and the
+-- Filter menu's rows inside Blizzard's menu code. An error there must not break the code that
+-- called it, nor repeat on every page. The first error is reported through the game's error
+-- handler and said once in chat; the search's results go back on screen unfiltered, and the
+-- filters stay off until /reload. Returns what func returns, or nothing after an error.
+Guarded = function(func, ...)
+	if stopped then
+		return
+	end
+	return Finish(xpcall(func, CallErrorHandler, ...))
 end
 
 --------------------------------------------------------------------------------
@@ -775,6 +781,12 @@ end
 
 local function OnStatClicked(key)
 	Guarded(ToggleStat, key)
+end
+
+-- The checkbox asks whether its stat is ticked each time the menu draws it. After an error the
+-- filters are off, and every box shows unticked.
+local function IsStatTicked(key)
+	return Guarded(IsTicked, key) == true
 end
 
 -- The red X: Blizzard puts its filters back to their defaults, and the addon unticks every stat
@@ -845,10 +857,10 @@ local function AddMatchChoices(frame)
 		x = x + width + MATCH_GAP
 		button:RegisterForClicks("LeftButtonUp")
 		button:SetScript("OnEnter", function()
-			highlight:Show()
+			Guarded(highlight.Show, highlight)
 		end)
 		button:SetScript("OnLeave", function()
-			highlight:Hide()
+			Guarded(highlight.Hide, highlight)
 		end)
 		button:SetScript("OnClick", function()
 			Guarded(function()
@@ -863,12 +875,22 @@ local function AddMatchChoices(frame)
 	return x - MATCH_GAP, 20
 end
 
+-- Blizzard's menu calls these on the rows' frames as it draws them, and sizes each row by what
+-- they return. After an error they add nothing, and the menu sizes the row by itself.
+local function InitTitle(frame)
+	return Guarded(AddVersion, frame)
+end
+
+local function InitMatchRow(frame)
+	return Guarded(AddMatchChoices, frame)
+end
+
 -- A title with the addon's name and version, Match all and Match any, and a submenu per group,
 -- at the end of Blizzard's Filter dropdown, after the spacer Blizzard queues behind its last
 -- group, with lines between a group's sections. A stat whose name the game doesn't have is left out.
 local function AddStatsMenu(root)
-	root:CreateTitle(ADDON_TITLE):AddInitializer(AddVersion)
-	root:CreateFrame():AddInitializer(AddMatchChoices)
+	root:CreateTitle(ADDON_TITLE):AddInitializer(InitTitle)
+	root:CreateFrame():AddInitializer(InitMatchRow)
 	for _, group in ipairs(ns.STAT_GROUPS) do
 		local submenu = root:CreateButton(_G[group.name])
 		for _, stat in ipairs(group.stats) do
@@ -877,7 +899,7 @@ local function AddStatsMenu(root)
 			else
 				local label = _G[stat.label]
 				if type(label) == "string" then
-					submenu:CreateCheckbox(label, IsTicked, OnStatClicked, stat.key)
+					submenu:CreateCheckbox(label, IsStatTicked, OnStatClicked, stat.key)
 				end
 			end
 		end

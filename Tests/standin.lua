@@ -35,6 +35,10 @@ DISABLED_FONT_COLOR = { GetRGB = function() return 0.5, 0.5, 0.5 end }
 for _, name in ipairs({ "STAT_CATEGORY_ATTRIBUTES", "STAT_CATEGORY_ATTACK", "STAT_CATEGORY_SPELL", "STAT_CATEGORY_DEFENSE", "STAT_CATEGORY_RESISTANCE", "TRADE_SKILLS" }) do
 	_G[name] = name
 end
+-- Two stats' names (BlizzardInterfaceResources, GlobalStrings/enUS.lua): the menu leaves out a
+-- stat the game has no name for, so these two get checkboxes.
+ITEM_MOD_STRENGTH_SHORT = "Strength"
+ITEM_MOD_INTELLECT_SHORT = "Intellect"
 AUCTION_HOUSE_DEFAULT_FILTERS = {}
 TextureKitConstants = { UseAtlasSize = true, IgnoreAtlasSize = false }
 SOUNDKIT = { IG_MAINMENU_OPTION_CHECKBOX_ON = 856 }
@@ -877,40 +881,71 @@ local function TitleInitializer(text)
 	end
 end
 
+-- Errors from the addon's code that reached Blizzard's menu.
+local menuErrors = 0
+
+-- The menu calls what an addon gives it through securecallfunction and secureexecuterange
+-- (Menu.lua: the Menu.ModifyMenu callbacks, each initializer, a checkbox's responder). ASSUMED
+-- (they are C functions, not in wow-ui-source): an error goes to the error handler, and the menu
+-- goes on as if the call returned nothing.
+local function Rest(_, ...)
+	return ...
+end
+local function MenuCall(func, ...)
+	return Rest(xpcall(func, function(message)
+		menuErrors = menuErrors + 1
+		CallErrorHandler(message)
+	end, ...))
+end
+
 -- The Filter menu opens with the addon's rows (Menu.ModifyMenu). The menu (Menu.lua, on the
 -- FULLSCREEN_DIALOG strata) makes a frame for each title and frame row, sizes it 1 by 1, and
 -- calls its initializers: the row's own first, then the ones added to it; the last size one
 -- returns is the row's (CallInitializers). The stat submenus are Blizzard's own buttons and
--- checkboxes, left out. Returns the rows: { kind, frame, width, height }.
+-- checkboxes, left out; each checkbox is kept as { text, isSelected, setSelected, data }.
+-- Returns the rows ({ kind, frame, width, height }) and the checkboxes.
 local function OpenFilterMenu()
 	local rows = {}
+	local checkboxes = {}
 	local function Row(kind, initializer)
 		local row = { kind = kind, initializers = { initializer } }
 		function row:AddInitializer(func) self.initializers[#self.initializers + 1] = func end
 		rows[#rows + 1] = row
 		return row
 	end
+	local submenu = {}
+	function submenu:CreateCheckbox(text, isSelected, setSelected, data)
+		checkboxes[#checkboxes + 1] = { text = text, isSelected = isSelected, setSelected = setSelected, data = data }
+	end
+	function submenu:CreateDivider() end
 	local root = {}
 	function root:CreateTitle(text) return Row("title", TitleInitializer(text)) end
 	function root:CreateFrame() return Row("frame", function() end) end
-	function root:CreateButton()
-		return { CreateCheckbox = function() end, CreateDivider = function() end }
-	end
-	Menu.modify(nil, root)
+	function root:CreateButton() return submenu end
+	MenuCall(Menu.modify, nil, root)
 	local menu = NewWidget("Frame")
 	menu:SetFrameStrata("FULLSCREEN_DIALOG")
 	for _, row in ipairs(rows) do
 		local frame = Configure(NewWidget("Frame", menu))
 		frame:SetSize(1, 1)
 		for _, initializer in ipairs(row.initializers) do
-			local width, height = initializer(frame)
+			local width, height = MenuCall(initializer, frame)
 			if width and height then
 				row.width, row.height = width, height
 			end
 		end
 		row.frame = frame
 	end
-	return rows
+	return rows, checkboxes
+end
+
+-- A checkbox in a stat submenu: drawn (its initializer asks whether it is ticked:
+-- MenuTemplates.CreateSelectionTextures) and clicked (Pick calls its responder).
+local function DrawCheckbox(checkbox)
+	return MenuCall(checkbox.isSelected, checkbox.data)
+end
+local function ClickCheckbox(checkbox)
+	MenuCall(checkbox.setSelected, checkbox.data)
 end
 
 -- What is attached to a frame of the menu, of one type, in the order attached.
@@ -1284,6 +1319,78 @@ scenarios["match choice"] = function()
 	if StatShopperDB.matchAny ~= false or next(StatShopperDB.stats) or x:IsShown() then
 		return false, "the red X left Match any, a tick or itself"
 	end
+	return true
+end
+
+-- An error inside the addon's rows of the menu is the addon's: reported once and said once in
+-- chat, it never reaches Blizzard's menu. What is left of the rows then does nothing: the choices
+-- don't change or light up, every stat shows unticked and a click changes nothing. The menu opens
+-- again without the addon's rows.
+scenarios["menu error"] = function()
+	TickStats({ "STRENGTH" })
+	local _, checkboxes = OpenFilterMenu()
+	local strength
+	for _, checkbox in ipairs(checkboxes) do
+		if checkbox.data == "STRENGTH" then
+			strength = checkbox
+		end
+	end
+	if not strength or DrawCheckbox(strength) ~= true then
+		return false, "Strength isn't ticked before the error"
+	end
+	-- The second choice of the Match row fails to attach, after the first is built.
+	local attach, attached = MenuTemplates.AttachBasicButton, 0
+	MenuTemplates.AttachBasicButton = function(...)
+		attached = attached + 1
+		if attached == 2 then
+			error("test error")
+		end
+		return attach(...)
+	end
+	local rows
+	rows, checkboxes = OpenFilterMenu()
+	MenuTemplates.AttachBasicButton = attach
+	if menuErrors > 0 then
+		return false, menuErrors .. " errors reached Blizzard's menu"
+	end
+	if #errors ~= 1 or #chat ~= 1 then
+		return false, string.format("%d errors reported, %d chat lines", #errors, #chat)
+	end
+	local matchRow = rows[2]
+	local all = matchRow and Attached(matchRow.frame, "Button")[1]
+	if not all then
+		return false, "the error came before the first choice was attached"
+	end
+	if matchRow.width then
+		return false, "the Match row still gave the menu its size"
+	end
+	local highlight
+	for _, texture in ipairs(Attached(all, "Texture")) do
+		if texture.file == "Interface\\QuestFrame\\UI-QuestTitleHighlight" then
+			highlight = texture
+		end
+	end
+	StatShopperDB.matchAny = true
+	all:GetScript("OnEnter")(all)
+	all:GetScript("OnClick")(all, "LeftButton")
+	all:GetScript("OnLeave")(all)
+	if not highlight or highlight:IsShown() or StatShopperDB.matchAny ~= true then
+		return false, "Match all lit up or changed the choice after the error"
+	end
+	for _, checkbox in ipairs(checkboxes) do
+		if DrawCheckbox(checkbox) ~= false then
+			return false, checkbox.text .. " doesn't show unticked after the error"
+		end
+	end
+	ClickCheckbox(strength)
+	if StatShopperDB.stats.STRENGTH ~= true then
+		return false, "a click on Strength changed the ticks after the error"
+	end
+	rows = OpenFilterMenu()
+	if #rows > 0 or menuErrors > 0 or #errors ~= 1 or #chat ~= 1 then
+		return false, string.format("opened again: %d rows of the addon's, %d more errors", #rows, #errors - 1 + menuErrors)
+	end
+	errors = {}
 	return true
 end
 
